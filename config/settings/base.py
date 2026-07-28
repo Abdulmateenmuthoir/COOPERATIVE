@@ -130,7 +130,9 @@ MEDIA_ROOT = BASE_DIR / config("MEDIA_ROOT", default="media")
 # ─── Django REST Framework ─────────────────────────────────────────────
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # Tenant-aware subclass — carries the token's tenant_id claim onto the
+        # user so TenantMiddleware can resolve it. See common/authentication.py.
+        "common.authentication.TenantAwareJWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",

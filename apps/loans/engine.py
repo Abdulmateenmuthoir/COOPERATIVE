@@ -134,7 +134,13 @@ class LoanEligibilityEngine:
         if not membership:
             return RuleResult("membership_duration", False, "No active membership found.")
 
-        months = (timezone.now() - membership.created_at).days // 30
+        # joined_at is when the member actually joined the cooperative. Falling back
+        # to the row's created_at would reset every member's tenure to zero on a bulk
+        # import, locking imported members out of loans for months.
+        joined_on = self.member.joined_at or timezone.localdate(membership.created_at)
+        source = "joined_at" if self.member.joined_at else "membership_record"
+
+        months = self._months_between(joined_on, timezone.localdate())
         required = self.product.min_membership_months
         passed = months >= required
 
@@ -142,8 +148,23 @@ class LoanEligibilityEngine:
             "membership_duration",
             passed,
             f"{'✓' if passed else '✗'} Membership: {months} months (required: {required})",
-            {"actual_months": months, "required_months": required},
+            {
+                "actual_months": months,
+                "required_months": required,
+                "joined_on": joined_on.isoformat(),
+                "source": source,
+            },
         )
+
+    @staticmethod
+    def _months_between(start, end) -> int:
+        """Whole calendar months elapsed between two dates."""
+        if end < start:
+            return 0
+        months = (end.year - start.year) * 12 + (end.month - start.month)
+        if end.day < start.day:
+            months -= 1
+        return max(months, 0)
 
     def _check_contribution_history(self) -> RuleResult:
         """Check if member has sufficient consecutive contributions."""
