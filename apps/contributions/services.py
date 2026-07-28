@@ -259,7 +259,8 @@ def get_member_balance(member_profile):
 
 def get_member_contribution_summary(member_profile):
     """Get a summary of a member's contributions across all cycles."""
-    from django.db.models import Count, Sum
+    from django.db.models import Count, Q, Sum
+
     from apps.contributions.models import ContributionEntry
 
     entries = ContributionEntry.objects.filter(
@@ -272,21 +273,15 @@ def get_member_contribution_summary(member_profile):
         total_cycles=Count("id"),
         total_due=Sum("amount_due"),
         total_received=Sum("amount_received"),
-        confirmed_count=Count("id", filter=models.Q(status=ContributionEntry.Status.CONFIRMED)),
-        missed_count=Count("id", filter=models.Q(status=ContributionEntry.Status.MISSED)),
+        confirmed_count=Count("id", filter=Q(status=ContributionEntry.Status.CONFIRMED)),
+        missed_count=Count("id", filter=Q(status=ContributionEntry.Status.MISSED)),
     )
-
-    # Need to import models for Q object
-    from django.db.models import Q
-
-    confirmed_count = entries.filter(status=ContributionEntry.Status.CONFIRMED).count()
-    missed_count = entries.filter(status=ContributionEntry.Status.MISSED).count()
 
     return {
         "total_cycles": summary["total_cycles"] or 0,
         "total_due": summary["total_due"] or Decimal("0.00"),
         "total_received": summary["total_received"] or Decimal("0.00"),
-        "confirmed_count": confirmed_count,
-        "missed_count": missed_count,
+        "confirmed_count": summary["confirmed_count"] or 0,
+        "missed_count": summary["missed_count"] or 0,
         "current_balance": get_member_balance(member_profile),
     }

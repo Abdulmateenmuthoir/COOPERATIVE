@@ -33,6 +33,9 @@ class EligibilityResult:
     rule_results: list
     approval_mode: str  # "auto" or "manual"
     message: str
+    # True when the guarantor rule is the *only* failing rule. The application is
+    # not rejected in that case — it waits for guarantors to confirm.
+    blocked_on_guarantors: bool = False
 
     def to_dict(self):
         return {
@@ -40,6 +43,7 @@ class EligibilityResult:
             "max_borrowable": str(self.max_borrowable),
             "approval_mode": self.approval_mode,
             "message": self.message,
+            "blocked_on_guarantors": self.blocked_on_guarantors,
             "rules": [
                 {
                     "rule_name": r.rule_name,
@@ -63,12 +67,17 @@ class LoanEligibilityEngine:
     4. Amount requested <= max_amount (or max_multiplier × total_contributions)
     5. Required guarantors count met
     6. All guarantors are active members in good standing
+
+    Rules 5 and 6 need an application to evaluate against. Pass one via
+    `application` to enforce them; without it they are reported for information
+    only (a member checking eligibility has not named guarantors yet).
     """
 
-    def __init__(self, member_profile, loan_product):
+    def __init__(self, member_profile, loan_product, application=None):
         self.member = member_profile
         self.product = loan_product
         self.tenant = member_profile.tenant
+        self.application = application
 
     def evaluate(self, amount_requested: Optional[Decimal] = None) -> EligibilityResult:
         """Run all eligibility checks and return the result."""
@@ -80,14 +89,22 @@ class LoanEligibilityEngine:
 
         max_borrowable = self._calculate_max_borrowable()
 
-        if amount_requested:
+        if amount_requested is not None:
             results.append(self._check_amount(amount_requested, max_borrowable))
+
+        guarantor_result = self._check_guarantors()
+        results.append(guarantor_result)
 
         all_passed = all(r.passed for r in results)
         approval_mode = "auto"
 
-        if amount_requested and amount_requested > self.product.auto_approval_threshold:
+        if amount_requested is not None and amount_requested > self.product.auto_approval_threshold:
             approval_mode = "manual"
+
+        # Missing guarantors are a "come back when they confirm", not a rejection.
+        blocked_on_guarantors = not guarantor_result.passed and all(
+            r.passed for r in results if r is not guarantor_result
+        )
 
         if all_passed:
             message = "You are eligible for a loan."
@@ -103,6 +120,7 @@ class LoanEligibilityEngine:
             rule_results=results,
             approval_mode=approval_mode,
             message=message,
+            blocked_on_guarantors=blocked_on_guarantors,
         )
 
     def _check_membership_duration(self) -> RuleResult:
@@ -176,6 +194,91 @@ class LoanEligibilityEngine:
             f"✓ No defaulted loans. Active loans: {active_count}",
             {"has_defaulted": False, "active_loans": active_count},
         )
+
+    def _check_guarantors(self) -> RuleResult:
+        """
+        Check that enough guarantors have *actively* confirmed.
+
+        Passive or assumed consent is never accepted, and a guarantor only counts
+        if they are an active member in good standing and are not the applicant.
+        """
+        from apps.loans.models import LoanGuarantor
+
+        required = self.product.guarantor_required_count
+
+        if required == 0:
+            return RuleResult(
+                "guarantors", True, "✓ No guarantors required for this product.",
+                {"required_count": 0, "confirmed_count": 0},
+            )
+
+        if self.application is None:
+            # Pre-application check — the member has not named anyone yet, so this
+            # is informational rather than a failure.
+            return RuleResult(
+                "guarantors", True,
+                f"This product requires {required} guarantor(s) who must confirm in the app.",
+                {"required_count": required, "confirmed_count": 0, "informational": True},
+            )
+
+        guarantors = list(
+            LoanGuarantor.objects.filter(application=self.application)
+            .select_related("guarantor_member__user")
+        )
+
+        confirmed = [g for g in guarantors if g.status == LoanGuarantor.Status.CONFIRMED]
+        declined = [g for g in guarantors if g.status == LoanGuarantor.Status.DECLINED]
+        valid = [g for g in confirmed if self._guarantor_in_good_standing(g.guarantor_member)]
+
+        valid_count = len(valid)
+        passed = valid_count >= required
+
+        if passed:
+            message = f"✓ Guarantors: {valid_count} confirmed (required: {required})"
+        elif declined and len(guarantors) - len(declined) < required:
+            message = (
+                f"✗ Guarantors: {len(declined)} declined — "
+                f"{valid_count} of {required} confirmed. Name a replacement guarantor."
+            )
+        else:
+            message = f"✗ Guarantors: {valid_count} of {required} confirmed."
+
+        return RuleResult(
+            "guarantors",
+            passed,
+            message,
+            {
+                "required_count": required,
+                "named_count": len(guarantors),
+                "confirmed_count": len(confirmed),
+                "valid_count": valid_count,
+                "declined_count": len(declined),
+                "rejected_as_ineligible": len(confirmed) - valid_count,
+            },
+        )
+
+    def _guarantor_in_good_standing(self, guarantor_profile) -> bool:
+        """A guarantor must be an active member, not the applicant, and not in default."""
+        from apps.loans.models import Loan
+        from apps.users.models import Membership
+
+        if guarantor_profile.id == self.member.id:
+            return False
+
+        is_active_member = Membership.objects.filter(
+            tenant=self.tenant,
+            user=guarantor_profile.user,
+            status=Membership.Status.ACTIVE,
+        ).exists()
+
+        if not is_active_member:
+            return False
+
+        return not Loan.objects.filter(
+            tenant=self.tenant,
+            application__member_profile=guarantor_profile,
+            status=Loan.Status.DEFAULTED,
+        ).exists()
 
     def _check_amount(self, amount_requested, max_borrowable) -> RuleResult:
         """Check if requested amount is within limits."""

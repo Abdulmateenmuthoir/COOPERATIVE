@@ -110,30 +110,27 @@ class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
                     guarantor_member=guarantor_profile,
                 )
 
-        # Auto-evaluate eligibility
-        engine = LoanEligibilityEngine(profile, application.loan_product)
+        # Evaluate eligibility. Guarantors have not confirmed yet at submission time,
+        # so any product requiring them lands in GUARANTOR_PENDING rather than approved.
+        engine = LoanEligibilityEngine(profile, application.loan_product, application=application)
         result = engine.evaluate(application.amount_requested)
         application.rule_evaluation = result.to_dict()
         application.evaluated_at = timezone.now()
 
-        if result.eligible:
-            if result.approval_mode == "auto":
-                # Check guarantors are all confirmed (for auto, may need them confirmed first)
-                pending_guarantors = application.guarantors.filter(
-                    status=LoanGuarantor.Status.PENDING
-                ).count()
-                if pending_guarantors > 0:
-                    application.status = LoanApplication.Status.GUARANTOR_PENDING
-                else:
-                    application.status = LoanApplication.Status.APPROVED
-            else:
-                application.status = LoanApplication.Status.ESCALATED
-                LoanApprovalEngine.escalate_to_executives(application)
+        if result.eligible and result.approval_mode == "auto":
+            application.save()
+            # auto_approve creates the Loan and repayment schedule, then marks disbursed.
+            LoanApprovalEngine.auto_approve(application)
+        elif result.eligible:
+            application.save()
+            LoanApprovalEngine.escalate_to_executives(application)
         else:
-            application.status = LoanApplication.Status.REJECTED
-            application.rejection_reason = result.message
-
-        application.save()
+            if result.blocked_on_guarantors:
+                application.status = LoanApplication.Status.GUARANTOR_PENDING
+            else:
+                application.status = LoanApplication.Status.REJECTED
+                application.rejection_reason = result.message
+            application.save()
 
         create_audit_log(
             request=self.request,
@@ -215,17 +212,26 @@ class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
             guarantor.confirmed_at = timezone.now()
             guarantor.save()
 
-            # Check if all guarantors are confirmed now
-            all_confirmed = not application.guarantors.filter(
+            # Nobody left to hear from — re-run the rules now that consent is in.
+            still_pending = application.guarantors.filter(
                 status=LoanGuarantor.Status.PENDING
             ).exists()
 
-            if all_confirmed and application.status == LoanApplication.Status.GUARANTOR_PENDING:
-                # Re-evaluate for auto-approval
-                engine = LoanEligibilityEngine(application.member_profile, application.loan_product)
+            if not still_pending and application.status == LoanApplication.Status.GUARANTOR_PENDING:
+                engine = LoanEligibilityEngine(
+                    application.member_profile,
+                    application.loan_product,
+                    application=application,
+                )
                 result = engine.evaluate(application.amount_requested)
+                application.rule_evaluation = result.to_dict()
+                application.evaluated_at = timezone.now()
+                application.save(update_fields=["rule_evaluation", "evaluated_at", "updated_at"])
+
                 if result.eligible and result.approval_mode == "auto":
                     LoanApprovalEngine.auto_approve(application)
+                elif result.eligible:
+                    LoanApprovalEngine.escalate_to_executives(application)
 
             return Response({"detail": "Guarantor confirmation recorded."})
         else:

@@ -11,6 +11,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -70,19 +71,12 @@ def generate_schedule(tenant, cycle, generated_by, batch_type="combined"):
             next_repayment = repayments.first()
             repayment_amount = next_repayment.amount_due
 
-        # Check for outstanding penalties
+        # Outstanding penalties. apply_penalty() posts these as APPLIED, so that
+        # is the status the bursary must recover — PENDING would always sum to zero.
         penalty_amount = PenaltyEntry.objects.filter(
             tenant=tenant,
             member_profile=profile,
             status=PenaltyEntry.Status.APPLIED,
-        ).aggregate(total=models.Sum("amount"))["total"] or Decimal("0.00")
-
-        # Need import for Sum
-        from django.db.models import Sum
-        penalty_amount = PenaltyEntry.objects.filter(
-            tenant=tenant,
-            member_profile=profile,
-            status=PenaltyEntry.Status.PENDING,
         ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
         line_total = contribution_amount + repayment_amount + penalty_amount
