@@ -12,7 +12,6 @@ from common.mixins import TenantScopedViewSetMixin
 from common.permissions import (
     HasTenantPermission,
     IsExecutiveOrAbove,
-    IsSocietyAdmin,
     IsTenantMember,
 )
 
@@ -58,11 +57,8 @@ class LoanProductViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
         if self.action in ["list", "retrieve"]:
             return [IsTenantMember()]
         # Loan products are society configuration — a rule package, not a
-        # running task. Only the society admin configures them.
-        # The `manage_loan_products` permission code is the formal gate;
-        # we fall back to the society-admin role check for backwards compatibility.
-        if self.request.role == "SOCIETY_ADMIN":
-            return [IsSocietyAdmin()]
+        # running task. Only the society admin configures them, expressed as the
+        # `manage_loan_products` permission (only SOCIETY_ADMIN holds it).
         return [HasTenantPermission(permission_code="manage_loan_products")]
 
     def perform_create(self, serializer):

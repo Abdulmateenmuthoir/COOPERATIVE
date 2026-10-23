@@ -122,7 +122,10 @@ USE_TZ = True
 # ─── Static & Media Files ─────────────────────────────────────────────
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# Static file storage is configured per-environment via STORAGES:
+#   dev  -> Django's default storage (runserver serves /static/ directly)
+#   prod -> WhiteNoise manifest storage (see config/settings/prod.py)
+# STATICFILES_STORAGE was removed in Django 5.1 and is no longer read.
 
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / config("MEDIA_ROOT", default="media")

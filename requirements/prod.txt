@@ -1,4 +1,8 @@
 -r base.txt
 
-# Production monitoring
-sentry-sdk[django]>=2.0,<3.0
+# Production-only additions.
+# Nothing else is required today: logs go to stdout (see LOGGING in
+# config/settings/base.py) and are captured by the platform's log stream.
+#
+# Uncomment once you actually wire Sentry into the project:
+# sentry-sdk[django]>=2.0,<3.0

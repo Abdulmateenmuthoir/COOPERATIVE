@@ -9,6 +9,8 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
+from common.health import liveness, readiness
+
 # ─── API v1 URL patterns ──────────────────────────────────────────────
 api_v1_patterns = [
     path("auth/", include("apps.users.urls.auth_urls")),
@@ -22,6 +24,10 @@ api_v1_patterns = [
 ]
 
 urlpatterns = [
+    # Health checks (unauthenticated, no DRF throttling)
+    path("health/", liveness, name="health-liveness"),
+    path("health/ready/", readiness, name="health-readiness"),
+
     # Django admin
     path("admin/", admin.site.urls),
 

@@ -135,11 +135,32 @@ class HasTenantPermission(BasePermission):
     2. Explicit user allow → True
     3. Role-based permission → True/False
 
-    Usage:
+    The required code(s) can be supplied in two ways:
+
+    1. As a class attribute on the view (used when the whole viewset is gated):
+
         class MyView(APIView):
             permission_classes = [HasTenantPermission]
             required_permissions = ['view_financials', 'prepare_deductions']
+
+    2. As a constructor argument (used from `get_permissions()` when only some
+       actions of a viewset are gated):
+
+        return [HasTenantPermission(permission_code="manage_members")]
+
+    When several codes are given, the caller must hold all of them.
     """
+
+    message = "You do not have permission to perform this action in this society."
+
+    def __init__(self, permission_code=None, permission_codes=None):
+        super().__init__()
+        explicit = []
+        if permission_code:
+            explicit.append(permission_code)
+        if permission_codes:
+            explicit.extend(permission_codes)
+        self.explicit_permissions = explicit
 
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
@@ -152,7 +173,7 @@ class HasTenantPermission(BasePermission):
         if not hasattr(request, "tenant") or request.tenant is None:
             return False
 
-        required_permissions = getattr(view, "required_permissions", [])
+        required_permissions = self.explicit_permissions or getattr(view, "required_permissions", [])
         if not required_permissions:
             return True
 

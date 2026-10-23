@@ -377,9 +377,17 @@ class MemberCreateSerializer(serializers.Serializer):
         return value
 
     def validate_role_code(self, value):
-        if not Role.objects.filter(code=value).exists():
-            raise serializers.ValidationError(f"Role '{value}' does not exist.")
+        # Tenant-scoped roles only: a society admin must never be able to hand
+        # out a platform role (SUPER_ADMIN) by posting role_code directly.
+        if not Role.objects.filter(code=value, scope=Role.Scope.TENANT).exists():
+            raise serializers.ValidationError(f"Tenant role '{value}' does not exist.")
         return value
+
+    def to_representation(self, instance):
+        # `create()` returns a Membership, not the input payload, so DRF's
+        # default representation (which reads email/first_name off it) would
+        # raise AttributeError. Render the created membership instead.
+        return MemberDetailSerializer(instance, context=self.context).data
 
     def create(self, validated_data):
         tenant = self.context["request"].tenant

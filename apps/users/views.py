@@ -5,6 +5,7 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -12,7 +13,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from common.mixins import TenantScopedViewSetMixin
-from common.permissions import IsExecutiveOrAbove, IsSocietyAdmin, IsTenantMember
+from common.permissions import (
+    HasTenantPermission,
+    IsExecutiveOrAbove,
+    IsSocietyAdmin,
+    IsTenantMember,
+)
 
 from apps.auditing.services import create_audit_log
 
@@ -188,33 +194,20 @@ class MemberViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
         if self.action == "guarantor_candidates":
             return [IsTenantMember()]
         if self.action == "create":
-            # Required permission: manage_members.
-            # Falls back to society-admin role check for backwards compatibility.
-            if self.request.role == "SOCIETY_ADMIN":
-                return [IsSocietyAdmin()]
+            # Adding a member is expressed as the `manage_members` permission,
+            # which only SOCIETY_ADMIN holds.
             return [HasTenantPermission(permission_code="manage_members")]
-        if self.action in ["update_status", "change_role"]:
-            # Required permissions: manage_roles and manage_members.
-            # Falls back to society-admin role check for backwards compatibility.
-            if self.request.role == "SOCIETY_ADMIN":
-                return [IsSocietyAdmin()]
-            # Check manage_members first, then manage_roles
-            perms = []
-            if HasTenantPermission(permission_code="manage_members"):
-                perms.append(HasTenantPermission(permission_code="manage_members"))
-            if HasTenantPermission(permission_code="manage_roles"):
-                perms.append(HasTenantPermission(permission_code="manage_roles"))
-            return perms if perms else [IsSocietyAdmin()]
+        if self.action == "update_status":
+            # Approving, suspending or removing a member.
+            return [HasTenantPermission(permission_code="manage_members")]
+        if self.action == "change_role":
+            # Promoting or demoting an officer.
+            return [HasTenantPermission(permission_code="manage_roles")]
         if self.action == "profile":
-            # Any active member may read their own profile; society admin may
-            # read/write any profile.
-            if self.request.role == "SOCIETY_ADMIN":
-                return [HasTenantPermission(permission_code="manage_members")]
+            # Any active member may read their own profile; SOCIETY_ADMIN may
+            # read and write anyone's. The ownership check happens in the action.
             return [IsTenantMember()]
         if self.action == "pending_members":
-            # Required permission: manage_members.
-            if self.request.role == "SOCIETY_ADMIN":
-                return [IsSocietyAdmin()]
             return [HasTenantPermission(permission_code="manage_members")]
         return [IsSocietyAdmin()]
 
@@ -351,9 +344,19 @@ class MemberViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
     def profile(self, request, pk=None):
         """
         GET/PUT/PATCH /api/v1/members/{id}/profile/
+
         Manage a member's tenant-specific profile.
+
+        A member may only read or edit their own profile; the full record holds
+        salary, bank and next-of-kin details, so anyone else needs to manage
+        members to reach it. Without this check any member of the society could
+        rewrite another member's bank account.
         """
         membership = self.get_object()
+
+        if not self._viewer_manages_members() and membership.user_id != request.user.id:
+            raise PermissionDenied("You can only view or edit your own profile.")
+
         profile, _ = MemberProfile.objects.get_or_create(
             tenant=request.tenant, user=membership.user
         )

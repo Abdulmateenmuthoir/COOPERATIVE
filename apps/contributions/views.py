@@ -11,7 +11,6 @@ from common.mixins import TenantScopedViewSetMixin
 from common.permissions import (
     HasTenantPermission,
     IsExecutiveOrAbove,
-    IsSocietyAdmin,
     IsTenantMember,
 )
 
@@ -60,11 +59,8 @@ class ContributionPlanViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
         if self.action in ["list", "retrieve"]:
             return [IsTenantMember()]
         # Plans are society configuration, not a running task: creating,
-        # editing and ending them is a society-admin act.
-        # The `manage_contribution_plans` permission code is the formal gate;
-        # we fall back to the society-admin role check for backwards compatibility.
-        if self.request.role == "SOCIETY_ADMIN":
-            return [IsSocietyAdmin()]
+        # editing and ending them is a society-admin act, expressed as the
+        # `manage_contribution_plans` permission (only SOCIETY_ADMIN holds it).
         return [HasTenantPermission(permission_code="manage_contribution_plans")]
 
 

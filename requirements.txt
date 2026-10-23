@@ -1,34 +1,7 @@
-# Django and core dependencies
-asgiref==3.8.1
-certifi==2024.8.30
-cffi==1.8.0
-cryptography==43.0.1
-Django==5.1
-django-celery-beat==2.7.0
-django-celery-result==2.5.1
-django-rest-framework-simplejwt==5.5.0
-djangorest-framework-simplejwt==5.5.0  # legacy
-django-filter==24.1
-drf-spectacular==0.23.6
-greenlet==3.1.0
-netaddr==0.8.0
-olefile==0.46
-packaging==24.2
-Pillow==10.2.0
-parso==0.4.1
-pexpect==4.9.0
-pickleshare==0.7.5
-pynput==1.7.8
-psycopg2==2.9.9
-pydantic==2.8.2
-pytz==2024.1
-redis==5.0.7
-ruff==10.0.1
-setuptools==70.0.0
-wheel==0.45.1
+# Single entry point for platforms that expect requirements.txt at the repo root
+# (Render, Railway, Heroku). The real dependency lists live in requirements/.
+#
+#   pip install -r requirements.txt        -> production set
+#   pip install -r requirements/dev.txt    -> production set + dev tooling
 
-# API & auth
-python-multipart==0.0.5
-
-# Utilities
-python-dotenv==1.0.1
+-r requirements/prod.txt

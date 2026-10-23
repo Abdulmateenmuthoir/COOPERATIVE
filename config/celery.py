@@ -1,14 +1,17 @@
-"""Celery configuration for the Cooperative Management Platform."""
-import os
+"""
+Celery configuration for the Cooperative Management Platform.
 
-from __future__ import absolute_import, unicode_literals
+The Celery app is imported from ``config/__init__.py`` so that it is loaded
+whenever Django starts. There are no Celery tasks in use yet, so no worker or
+broker is required to run the API; the app is only wired up for future use.
+"""
+import os
 
 from celery import Celery
 
-os.environ.setdefault(
-    "DJANGO_SETTINGS_MODULE",
-    "config.settings." + os.getenv("DJANGO_ENV", "dev"),
-)
+from config.runtime import settings_module
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", settings_module())
 
 app = Celery("cooperative_platform")
 

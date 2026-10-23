@@ -1,10 +1,12 @@
 """
-ASGI config for cooperative_platform project.
+ASGI config for the Cooperative Management SaaS Platform.
 """
 import os
 
 from django.core.asgi import get_asgi_application
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
+from config.runtime import settings_module
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", settings_module())
 
 application = get_asgi_application()

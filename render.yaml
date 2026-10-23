@@ -1,77 +1,50 @@
-# Render.com deployment configuration for the ACADA Cooperative Platform
-# https://render.com/docs/services
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Optional: this file lets Render create the whole stack from scratch
+# (Dashboard -> New -> Blueprint). If you already created the service by hand,
+# Render ignores this file and you configure the same values in the Dashboard.
+#
+# Region, plan and instance names below are examples — adjust to taste.
 
 services:
-  # Django backend service
-  web:
-    # The Dockerfile in the repo root builds the Python environment
-    # Render automatically detects services from the repository
-    # Static files served via WhiteNoise from the Django app
-    
-    # For Render, we use Python directly (not Docker) since the repo
-    # has requirements.txt and manage.py at the root
-    # See: https://render.com/docs/python
-    
-    # Build command: install dependencies
-    # Start command: run Django with gunicorn
-    # Note: Render sets the $PORT environment variable automatically
-    
-    # Environment variables to set in the Render dashboard:
-    #   DJANGO_ENV=prod
-    #   SECRET_KEY=your-secret-key
-    #   ALLOWED_HOSTS=your-render-service-url,your-domain.com
-    #   DEBUG=False
-    #   CORS_ALLOWED_ORIGINS=https://your-frontend-domain.com
-    #   DATABASE_URL=postgres://...
-    #   REDIS_URL=redis://...
-    #   JWT_ACCESS_TOKEN_LIFETIME_MINUTES=30
-    #   JWT_REFRESH_TOKEN_LIFETIME_DAYS=7
-    
-    # Railway/Render compatibility:
-    # The $PORT env var is set by the platform; gunicorn will bind to it
-    
-    # If using a custom Dockerfile instead of Render's auto-detection:
-    # build: .
-    # command: sh -c "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT"
-    
-    # For Render's native Python service (no Docker):
-    # https://render.com/docs/python#how-it-works
-    # - Render installs: pip install -r requirements.txt
-    # - Render runs: python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
-    
-    # Environment variables (set via Render dashboard):
-    #   DJANGO_ENV: prod
-    #   SECRET_KEY: [your 50+ char random string]
-    #   ALLOWED_HOSTS: [your-service-name.onrender.com, your-domain.com]
-    #   DEBUG: false
-    #   CORS_ALLOWED_ORIGINS: https://your-frontend-domain.com
-    #   DATABASE_URL: postgres://user:pass@host:port/dbname
-    #   REDIS_URL: redis://host:port/0
-    #   JWT_ACCESS_TOKEN_LIFETIME_MINUTES: 30
-    #   JWT_REFRESH_TOKEN_LIFETIME_DAYS: 7
-    #   PLATFORM_ADMIN_EMAIL: admin@your-domain.com
-    
-    # Health check Render can use (optional)
-    # runtime: python3.11
-    # autoDeploy: true
+  - type: web
+    name: acada-cooperative-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /health/
+    # collectstatic runs at build time so the manifest WhiteNoise needs exists
+    # before the first request. Migrations run at start-up because the build
+    # container has no guaranteed network access to the database.
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput
+    startCommand: bash seed_on_first_deploy.sh
+    envVars:
+      - key: DJANGO_ENV
+        value: prod
+      # Generated once by Render and never committed to the repo.
+      - key: SECRET_KEY
+        generateValue: true
+      # ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS are derived from
+      # RENDER_EXTERNAL_HOSTNAME by config/settings/prod.py. Only set them for
+      # custom domains:
+      #   ALLOWED_HOSTS=api.example.com
+      #   CSRF_TRUSTED_ORIGINS=https://api.example.com
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: acada-cooperative-db
+          property: connectionString
+      - key: JWT_ACCESS_TOKEN_LIFETIME_MINUTES
+        value: "30"
+      - key: JWT_REFRESH_TOKEN_LIFETIME_DAYS
+        value: "7"
 
-# Database service (managed Postgres on Render)
-# Uncomment and configure if using Render's managed Postgres:
-#
-# databases:
-#   postgres:
-#     # Render will inject the DATABASE_URL env var automatically
-#     # see: https://render.com/docs/databases
-    
-# Redis service (managed Redis on Render)
-# Uncomment if using Render's managed Redis:
-#
-# redis:
-#   # Render will inject the REDIS_URL env var automatically
-#   # see: https://render.com/docs/redis
-
-# Note: 
-# - Render automatically detects Python projects with requirements.txt
-# - Render sets $PORT environment variable for the web service
-# - Render injects DATABASE_URL and REDIS_URL if you add managed services
-# - All other env vars must be added manually in the dashboard
+databases:
+  - name: acada-cooperative-db
+    databaseName: coop_db
+    user: coop_user
+    plan: free
+    region: frankfurt
