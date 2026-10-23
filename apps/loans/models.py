@@ -12,6 +12,13 @@ from django.db import models
 from common.models import TenantScopedModel
 
 
+class InterestMethod(models.TextChoices):
+    """The basis on which interest is charged on a loan."""
+
+    FLAT = "flat", "Flat (simple) interest"
+    REDUCING = "reducing", "Reducing balance (amortised)"
+
+
 class LoanProduct(TenantScopedModel):
     """
     Configurable loan rule package.
@@ -46,6 +53,16 @@ class LoanProduct(TenantScopedModel):
     interest_rate = models.DecimalField(
         max_digits=5, decimal_places=2, default=Decimal("5.00"),
         help_text="Annual interest rate as a percentage.",
+    )
+    interest_method = models.CharField(
+        max_length=20,
+        choices=InterestMethod.choices,
+        default=InterestMethod.FLAT,
+        help_text=(
+            "How the interest is charged. FLAT: simple interest on the original "
+            "principal for the whole term. REDUCING: interest on the falling "
+            "balance (amortised)."
+        ),
     )
     max_term_months = models.PositiveIntegerField(
         default=24, help_text="Maximum repayment period in months."
@@ -202,6 +219,12 @@ class Loan(TenantScopedModel):
     principal_amount = models.DecimalField(max_digits=12, decimal_places=2)
     approved_amount = models.DecimalField(max_digits=12, decimal_places=2)
     interest_rate = models.DecimalField(max_digits=5, decimal_places=2)
+    interest_method = models.CharField(
+        max_length=20,
+        choices=InterestMethod.choices,
+        default=InterestMethod.FLAT,
+        help_text="The basis the interest was charged on. Snapshotted at approval.",
+    )
     term_months = models.PositiveIntegerField()
     total_repayable = models.DecimalField(
         max_digits=12, decimal_places=2,

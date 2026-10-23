@@ -1,0 +1,77 @@
+# Render.com deployment configuration for the ACADA Cooperative Platform
+# https://render.com/docs/services
+
+services:
+  # Django backend service
+  web:
+    # The Dockerfile in the repo root builds the Python environment
+    # Render automatically detects services from the repository
+    # Static files served via WhiteNoise from the Django app
+    
+    # For Render, we use Python directly (not Docker) since the repo
+    # has requirements.txt and manage.py at the root
+    # See: https://render.com/docs/python
+    
+    # Build command: install dependencies
+    # Start command: run Django with gunicorn
+    # Note: Render sets the $PORT environment variable automatically
+    
+    # Environment variables to set in the Render dashboard:
+    #   DJANGO_ENV=prod
+    #   SECRET_KEY=your-secret-key
+    #   ALLOWED_HOSTS=your-render-service-url,your-domain.com
+    #   DEBUG=False
+    #   CORS_ALLOWED_ORIGINS=https://your-frontend-domain.com
+    #   DATABASE_URL=postgres://...
+    #   REDIS_URL=redis://...
+    #   JWT_ACCESS_TOKEN_LIFETIME_MINUTES=30
+    #   JWT_REFRESH_TOKEN_LIFETIME_DAYS=7
+    
+    # Railway/Render compatibility:
+    # The $PORT env var is set by the platform; gunicorn will bind to it
+    
+    # If using a custom Dockerfile instead of Render's auto-detection:
+    # build: .
+    # command: sh -c "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT"
+    
+    # For Render's native Python service (no Docker):
+    # https://render.com/docs/python#how-it-works
+    # - Render installs: pip install -r requirements.txt
+    # - Render runs: python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
+    
+    # Environment variables (set via Render dashboard):
+    #   DJANGO_ENV: prod
+    #   SECRET_KEY: [your 50+ char random string]
+    #   ALLOWED_HOSTS: [your-service-name.onrender.com, your-domain.com]
+    #   DEBUG: false
+    #   CORS_ALLOWED_ORIGINS: https://your-frontend-domain.com
+    #   DATABASE_URL: postgres://user:pass@host:port/dbname
+    #   REDIS_URL: redis://host:port/0
+    #   JWT_ACCESS_TOKEN_LIFETIME_MINUTES: 30
+    #   JWT_REFRESH_TOKEN_LIFETIME_DAYS: 7
+    #   PLATFORM_ADMIN_EMAIL: admin@your-domain.com
+    
+    # Health check Render can use (optional)
+    # runtime: python3.11
+    # autoDeploy: true
+
+# Database service (managed Postgres on Render)
+# Uncomment and configure if using Render's managed Postgres:
+#
+# databases:
+#   postgres:
+#     # Render will inject the DATABASE_URL env var automatically
+#     # see: https://render.com/docs/databases
+    
+# Redis service (managed Redis on Render)
+# Uncomment if using Render's managed Redis:
+#
+# redis:
+#   # Render will inject the REDIS_URL env var automatically
+#   # see: https://render.com/docs/redis
+
+# Note: 
+# - Render automatically detects Python projects with requirements.txt
+# - Render sets $PORT environment variable for the web service
+# - Render injects DATABASE_URL and REDIS_URL if you add managed services
+# - All other env vars must be added manually in the dashboard

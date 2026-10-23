@@ -20,8 +20,10 @@ from django.utils import timezone
 
 DEFAULT_PASSWORD = "Passw0rd!23"
 
-# The canonical permission catalog from the PRD (section 7.4). Views currently
-# gate on role codes, but the PBAC override model resolves against these.
+# The canonical permission catalog from the PRD (section 7.4). The officer-read
+# endpoints and loan decisions are gated on these codes; the rest of the API
+# still gates on role codes, so the `manage_*` entries are documentation for
+# now. See the "Known gaps" section of the README.
 PERMISSIONS = [
     ("view_financials", "contributions", "View financial summaries and balances"),
     ("record_contributions", "contributions", "Record and confirm contributions"),
@@ -56,6 +58,13 @@ DEMO_MEMBERS = [
     ("folake", "Folake", "Adeyemi", "Economics", "Lecturer I"),
     ("emeka", "Emeka", "Nwosu", "Computer Science", "Lecturer II"),
     ("hauwa", "Hauwa", "Ibrahim", "Law", "Senior Lecturer"),
+]
+
+# A read-only officer. Without an account here the COMMITTEE_MEMBER role
+# cannot be tried at all — the role exists, but nothing is ever assigned it.
+# (tag, first, last, department, designation)
+DEMO_COMMITTEE = [
+    ("committee", "Chioma", "Eze", "Accounting", "Lecturer I"),
 ]
 
 
@@ -106,18 +115,39 @@ class Command(BaseCommand):
             tenant=tenant,
             defaults={"currency": "NGN", "timezone": "Africa/Lagos", "locale": "en-NG"},
         )
-        TenantRuleSet.objects.get_or_create(
+        rule_set, _ = TenantRuleSet.objects.get_or_create(
             tenant=tenant,
             version=1,
             defaults={
                 "active_from": date(2026, 1, 1),
                 "rules": {
                     "penalty": {"missed_payment_flat": "500.00", "missed_payment_rate": "0.00"},
-                    "loan": {"escalation_threshold": "100000.00"},
+                    "loan": {
+                        "escalation_threshold": "100000.00",
+                        "default_interest_rate": "5.00",
+                        "default_interest_method": "flat",
+                        "max_term_months": 36,
+                    },
                 },
                 "notes": "Seeded demo rules.",
             },
         )
+
+        # Idempotent upgrade — an existing rule set keeps whatever the
+        # society has configured, but gains the keys the platform now reads.
+        rules = dict(rule_set.rules or {})
+        loan_rules = dict(rules.get("loan") or {})
+        for key, default in (
+            ("escalation_threshold", "100000.00"),
+            ("default_interest_rate", "5.00"),
+            ("default_interest_method", "flat"),
+            ("max_term_months", 36),
+        ):
+            loan_rules.setdefault(key, default)
+        if loan_rules != (rules.get("loan") or {}):
+            rules["loan"] = loan_rules
+            rule_set.rules = rules
+            rule_set.save(update_fields=["rules", "updated_at"])
         self.stdout.write(f"Tenant: {tenant.name} ({'created' if created else 'existing'})")
 
         # ── Roles ────────────────────────────────────────────────────
@@ -134,18 +164,24 @@ class Command(BaseCommand):
 
         # ── Accounts ─────────────────────────────────────────────────
         platform_admin = self._make_user(
-            f"platform@{code}.demo", "Platform", "Admin", password, is_platform_user=True, is_staff=True
+            f"platform@{code}.demo", "Platform", "Admin", password,
+            superuser=True, is_platform_user=True, is_staff=True,
         )
         president = self._make_member(tenant, roles["SOCIETY_ADMIN"], code, password,
                                       "president", "Bolanle", "Ajayi", "Registry", "President")
         treasurer = self._make_member(tenant, roles["EXECUTIVE"], code, password,
                                       "treasurer", "Segun", "Balogun", "Bursary", "Treasurer")
+        committee = [
+            self._make_member(tenant, roles["COMMITTEE_MEMBER"], code, password,
+                              tag, first, last, dept, title)
+            for tag, first, last, dept, title in DEMO_COMMITTEE
+        ]
 
         members = [
             self._make_member(tenant, roles["MEMBER"], code, password, tag, first, last, dept, title)
             for tag, first, last, dept, title in DEMO_MEMBERS
         ]
-        self.stdout.write(f"Accounts: 1 platform admin, 1 president, 1 treasurer, {len(members)} members")
+        self.stdout.write(f"Accounts: 1 platform admin, 1 president, 1 treasurer, {len(committee)} committee, {len(members)} members")
 
         # ── Contribution plan + six months of history ────────────────
         self._seed_contributions(tenant, treasurer.user, members)
@@ -153,7 +189,7 @@ class Command(BaseCommand):
         # ── Loan product + one live loan ─────────────────────────────
         self._seed_loan(tenant, members)
 
-        self._report(tenant, code, password, platform_admin, president, treasurer, members)
+        self._report(tenant, code, password, platform_admin, president, treasurer, committee, members)
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -180,13 +216,45 @@ class Command(BaseCommand):
         UserAccount.objects.filter(email__endswith=f"@{code}.demo").delete()
         self.stdout.write(self.style.WARNING(f"Deleted existing tenant '{code}' and its demo users."))
 
-    def _make_user(self, email, first, last, password, **flags):
+    def _make_user(self, email, first, last, password, *, superuser=False, **flags):
+        """
+        Create (or fetch) a demo account.
+
+        `superuser=True` is used for the platform administrator. Django's
+        admin site only shows models a user has permission on, and a plain
+        staff account with no model permissions lands on the "You don't have
+        permission to view or edit anything" page. The platform operator is
+        meant to be able to administer the whole platform, so that account is
+        a Django superuser.
+
+        The API is unaffected — its permissions come from the custom
+        permission classes, not from Django's `has_perm`.
+        """
         from apps.users.models import UserAccount
+
+        if superuser:
+            # Fold these into `flags` so they are also re-applied to an
+            # account that already exists.
+            flags.setdefault("is_superuser", True)
+            flags.setdefault("is_staff", True)
 
         user = UserAccount.objects.filter(email=email).first()
         if user:
+            # Re-apply the flags so an account seeded before they were
+            # introduced is brought up to date.
+            changed = [f for f, v in flags.items() if getattr(user, f) != v]
+            for field in changed:
+                setattr(user, field, flags[field])
+            if changed:
+                user.save(update_fields=changed)
             return user
-        return UserAccount.objects.create_user(
+
+        create = (
+            UserAccount.objects.create_superuser
+            if superuser
+            else UserAccount.objects.create_user
+        )
+        return create(
             email=email, password=password, first_name=first, last_name=last, **flags
         )
 
@@ -196,14 +264,20 @@ class Command(BaseCommand):
 
         user = self._make_user(f"{tag}@{code}.demo", first, last, password)
 
-        Membership.objects.get_or_create(
+        membership, _ = Membership.objects.get_or_create(
             tenant=tenant, user=user,
             defaults={
-                "role": role,
                 "status": Membership.Status.ACTIVE,
                 "approved_at": timezone.now(),
             },
         )
+        # Re-apply the role and status, so re-seeding a database that was
+        # seeded before a role change actually moves the account.
+        if membership.role_id != role.id or membership.status != Membership.Status.ACTIVE:
+            membership.role = role
+            membership.status = Membership.Status.ACTIVE
+            membership.approved_at = membership.approved_at or timezone.now()
+            membership.save(update_fields=["role", "status", "approved_at", "updated_at"])
         profile, _ = MemberProfile.objects.get_or_create(
             tenant=tenant, user=user,
             defaults={
@@ -270,7 +344,7 @@ class Command(BaseCommand):
 
     def _seed_loan(self, tenant, members):
         from apps.loans.engine import LoanApprovalEngine, LoanEligibilityEngine
-        from apps.loans.models import LoanApplication, LoanGuarantor, LoanProduct
+        from apps.loans.models import InterestMethod, LoanApplication, LoanGuarantor, LoanProduct
 
         product, _ = LoanProduct.objects.get_or_create(
             tenant=tenant, name="Standard Loan",
@@ -282,8 +356,27 @@ class Command(BaseCommand):
                 "max_amount": Decimal("500000.00"),
                 "max_multiplier": Decimal("2.00"),
                 "interest_rate": Decimal("5.00"),
+                "interest_method": InterestMethod.FLAT,
                 "max_term_months": 24,
                 "auto_approval_threshold": Decimal("100000.00"),
+            },
+        )
+
+        # A second product on the other interest basis, so a society can see
+        # both calculations side by side.
+        LoanProduct.objects.get_or_create(
+            tenant=tenant, name="Salary Advance",
+            defaults={
+                "description": "Short-term advance on the next salary, repaid on a reducing balance.",
+                "min_membership_months": 6,
+                "min_contribution_months": 3,
+                "guarantor_required_count": 1,
+                "max_amount": Decimal("300000.00"),
+                "max_multiplier": Decimal("1.50"),
+                "interest_rate": Decimal("4.00"),
+                "interest_method": InterestMethod.REDUCING,
+                "max_term_months": 12,
+                "auto_approval_threshold": Decimal("50000.00"),
             },
         )
 
@@ -320,7 +413,7 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.WARNING(f"Loans: application not auto-approved — {result.message}"))
 
-    def _report(self, tenant, code, password, platform_admin, president, treasurer, members):
+    def _report(self, tenant, code, password, platform_admin, president, treasurer, committee, members):
         line = "─" * 62
         self.stdout.write("\n" + line)
         self.stdout.write(self.style.SUCCESS("  Demo data ready"))
@@ -330,6 +423,8 @@ class Command(BaseCommand):
         self.stdout.write(f"  Platform admin  {platform_admin.email}   (Django admin, /api/v1/platform/)")
         self.stdout.write(f"  President       {president.user.email}   (SOCIETY_ADMIN)")
         self.stdout.write(f"  Treasurer       {treasurer.user.email}   (EXECUTIVE)")
+        for profile in committee:
+            self.stdout.write(f"  Committee       {profile.user.email}   (COMMITTEE_MEMBER, read-only)")
         for profile in members:
             self.stdout.write(f"  Member          {profile.user.email}")
         self.stdout.write("\n  Log in with:")

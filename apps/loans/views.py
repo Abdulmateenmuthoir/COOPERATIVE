@@ -1,6 +1,7 @@
 """
 Loans app views — Loan Products, Applications, Guarantors, Approval, and Repayments.
 """
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -8,9 +9,15 @@ from rest_framework.response import Response
 
 from apps.auditing.services import create_audit_log
 from common.mixins import TenantScopedViewSetMixin
-from common.permissions import IsExecutiveOrAbove, IsTenantMember
+from common.permissions import (
+    HasTenantPermission,
+    IsExecutiveOrAbove,
+    IsSocietyAdmin,
+    IsTenantMember,
+)
 
 from .engine import LoanApprovalEngine, LoanEligibilityEngine
+from .interest import InterestCalculationError, calculate_repayment
 from .models import (
     Loan,
     LoanApplication,
@@ -23,9 +30,16 @@ from .serializers import (
     LoanApplicationCreateSerializer,
     LoanApplicationDetailSerializer,
     LoanApplicationListSerializer,
+    LoanGuaranteeRequestSerializer,
     LoanGuarantorSerializer,
     LoanProductSerializer,
+    LoanQuoteSerializer,
     LoanSerializer,
+)
+from .services import (
+    default_interest_method,
+    default_interest_rate,
+    effective_max_term_months,
 )
 
 
@@ -36,11 +50,43 @@ class LoanProductViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
 
     queryset = LoanProduct.objects.all()
     serializer_class = LoanProductSerializer
+    search_fields = ["name", "description"]
+    filterset_fields = ["is_active"]
+    ordering_fields = ["name", "max_amount", "interest_rate", "created_at"]
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
             return [IsTenantMember()]
-        return [IsExecutiveOrAbove()]
+        # Loan products are society configuration — a rule package, not a
+        # running task. Only the society admin configures them.
+        # The `manage_loan_products` permission code is the formal gate;
+        # we fall back to the society-admin role check for backwards compatibility.
+        if self.request.role == "SOCIETY_ADMIN":
+            return [IsSocietyAdmin()]
+        return [HasTenantPermission(permission_code="manage_loan_products")]
+
+    def perform_create(self, serializer):
+        """
+        Create a product, filling in the society's house rate and interest
+        basis when the caller did not state them.
+
+        The rule set lets a cooperative set its rate and basis once, so
+        every product it creates starts from the same footing.
+        """
+        tenant = self.request.tenant
+        defaults = {}
+
+        if "interest_rate" not in serializer.validated_data:
+            rate = default_interest_rate(tenant)
+            if rate is not None:
+                defaults["interest_rate"] = rate
+
+        if "interest_method" not in serializer.validated_data:
+            method = default_interest_method(tenant)
+            if method is not None:
+                defaults["interest_method"] = method
+
+        serializer.save(tenant=tenant, **defaults)
 
 
 class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
@@ -50,36 +96,202 @@ class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
 
     queryset = LoanApplication.objects.select_related("member_profile__user", "loan_product")
     permission_classes = [IsTenantMember]
+    search_fields = [
+        "member_profile__user__email",
+        "member_profile__user__first_name",
+        "member_profile__user__last_name",
+        "loan_product__name",
+        "purpose",
+    ]
+    filterset_fields = ["status"]
+    ordering_fields = ["created_at", "amount_requested", "status", "submitted_at"]
+
+    # Deciding an application is an officer act, not a member one. The
+    # `approve_loans` permission is held by EXECUTIVE and SOCIETY_ADMIN only —
+    # a MEMBER (whose queryset resolves to their own applications) and a
+    # read-only COMMITTEE_MEMBER are both refused.
+    required_permissions = ["approve_loans"]
+
+    def get_permissions(self):
+        if self.action == "approve_or_reject":
+            return [HasTenantPermission()]
+        return [IsTenantMember()]
 
     def get_serializer_class(self):
         if self.action == "list":
             return LoanApplicationListSerializer
         if self.action == "create":
             return LoanApplicationCreateSerializer
+        if self.action == "retrieve":
+            # A guarantor only sees the restricted view of an application.
+            if self._viewer_is_officer_or_applicant():
+                return LoanApplicationDetailSerializer
+            return LoanGuaranteeRequestSerializer
         return LoanApplicationDetailSerializer
+
+    def _viewer_profile(self):
+        """The member profile of the signed-in user in this tenant, if any."""
+        from apps.users.models import MemberProfile
+
+        return MemberProfile.objects.filter(
+            tenant=self.request.tenant, user=self.request.user
+        ).first()
+
+    def _viewer_membership(self):
+        from apps.users.models import Membership
+
+        return Membership.objects.filter(
+            tenant=self.request.tenant,
+            user=self.request.user,
+            status=Membership.Status.ACTIVE,
+        ).first()
+
+    def _viewer_is_officer_or_applicant(self):
+        """
+        True when the signed-in user is a society officer (anything other
+        than MEMBER) or the applicant on the application being read.
+        """
+        if self.request.user.is_platform_user:
+            return True
+
+        membership = self._viewer_membership()
+        if not membership:
+            return False
+        if membership.role.code != "MEMBER":
+            return True
+
+        profile = self._viewer_profile()
+        if not profile:
+            return False
+
+        return LoanApplication.objects.filter(
+            pk=self.kwargs.get("pk"), member_profile=profile
+        ).exists()
 
     def get_queryset(self):
         qs = super().get_queryset()
-        # Regular members only see their own applications
+        # Regular members see their own applications *and* any application
+        # where they are named as a guarantor. `?scope=` narrows that down to
+        # one side of the split.
         if not self.request.user.is_platform_user:
-            from apps.users.models import Membership
+            from apps.users.models import Membership, MemberProfile
+
             membership = Membership.objects.filter(
                 tenant=self.request.tenant,
                 user=self.request.user,
                 status=Membership.Status.ACTIVE,
             ).first()
             if membership and membership.role.code == "MEMBER":
-                from apps.users.models import MemberProfile
                 profile = MemberProfile.objects.filter(
                     tenant=self.request.tenant, user=self.request.user
                 ).first()
                 if profile:
-                    qs = qs.filter(member_profile=profile)
+                    scope = (self.request.query_params.get("scope") or "").lower()
+                    if scope == "mine":
+                        qs = qs.filter(member_profile=profile)
+                    elif scope == "guarantor":
+                        qs = qs.filter(guarantors__guarantor_member=profile).distinct()
+                    else:
+                        qs = qs.filter(
+                            Q(member_profile=profile)
+                            | Q(guarantors__guarantor_member=profile)
+                        ).distinct()
         return qs
+
+    def retrieve(self, request, *args, **kwargs):
+        """Serve the restricted view when the viewer is only a guarantor."""
+        instance = self.get_object()
+        serializer_class = self.get_serializer_class()
+
+        if serializer_class is LoanGuaranteeRequestSerializer:
+            self._attach_viewer_guarantor(instance)
+
+        serializer = serializer_class(instance, context=self.get_serializer_context())
+        return Response(serializer.data)
+
+    def _attach_viewer_guarantor(self, application):
+        """Tag an application with the viewer's own guarantor record."""
+        profile = self._viewer_profile()
+        if profile is None:
+            return None
+
+        guarantor = application.guarantors.filter(
+            guarantor_member=profile
+        ).first()
+        application._viewer_guarantor = guarantor
+        return guarantor
+
+    @action(detail=True, methods=["get"], url_path="guarantee-request")
+    def guarantee_request(self, request, pk=None):
+        """
+        GET /api/v1/loans/applications/{id}/guarantee-request/
+        The restricted view of an application, from the point of view of the
+        signed-in user as a guarantor.
+        """
+        application = self.get_object()
+        self._attach_viewer_guarantor(application)
+
+        serializer = LoanGuaranteeRequestSerializer(
+            application, context=self.get_serializer_context()
+        )
+        return Response(serializer.data)
+
+    @action(detail=False, methods=["get"], url_path="guarantor-requests")
+    def guarantor_requests(self, request):
+        """
+        GET /api/v1/loans/applications/guarantor-requests/
+        Applications where the signed-in member is named as a guarantor.
+        """
+        profile = self._viewer_profile()
+        if profile is None:
+            return Response([])
+
+        applications = (
+            LoanApplication.objects.filter(
+                tenant=request.tenant, guarantors__guarantor_member=profile
+            )
+            .select_related("loan_product", "member_profile__user")
+            .prefetch_related("guarantors")
+            .distinct()
+        )
+
+        for application in applications:
+            application._viewer_guarantor = next(
+                (
+                    guarantor
+                    for guarantor in application.guarantors.all()
+                    if guarantor.guarantor_member_id == profile.id
+                ),
+                None,
+            )
+
+        serializer = LoanGuaranteeRequestSerializer(
+            applications, many=True, context=self.get_serializer_context()
+        )
+        return Response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        """
+        Create an application and return the *detail* representation.
+
+        The create serializer only carries the submitted fields, so the
+        response would not carry the new id, the evaluated status or the
+        guarantor records. The client needs those to link to the application
+        it just created.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+
+        detail = LoanApplicationDetailSerializer(
+            serializer.instance, context=self.get_serializer_context()
+        )
+        return Response(detail.data, status=status.HTTP_201_CREATED)
 
     def perform_create(self, serializer):
         """Create loan application with guarantors."""
         from apps.users.models import MemberProfile
+        from apps.notifications.services import notify_guarantor_request
 
         profile = MemberProfile.objects.filter(
             tenant=self.request.tenant, user=self.request.user
@@ -104,11 +316,12 @@ class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
                 tenant=self.request.tenant, id=gid
             ).first()
             if guarantor_profile:
-                LoanGuarantor.objects.create(
+                guarantor = LoanGuarantor.objects.create(
                     tenant=self.request.tenant,
                     application=application,
                     guarantor_member=guarantor_profile,
                 )
+                notify_guarantor_request(application, guarantor)
 
         # Evaluate eligibility. Guarantors have not confirmed yet at submission time,
         # so any product requiring them lands in GUARANTOR_PENDING rather than approved.
@@ -191,6 +404,7 @@ class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
         """
         application = self.get_object()
         from apps.users.models import MemberProfile
+        from apps.notifications.services import notify_guarantor_response
 
         profile = MemberProfile.objects.filter(
             tenant=request.tenant, user=request.user
@@ -233,11 +447,13 @@ class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
                 elif result.eligible:
                     LoanApprovalEngine.escalate_to_executives(application)
 
+            notify_guarantor_response(application, guarantor)
             return Response({"detail": "Guarantor confirmation recorded."})
         else:
             guarantor.status = LoanGuarantor.Status.DECLINED
             guarantor.decline_reason = request.data.get("reason", "")
             guarantor.save()
+            notify_guarantor_response(application, guarantor)
             return Response({"detail": "Guarantor declined."})
 
 
@@ -270,9 +486,67 @@ class EligibilityCheckView(viewsets.ViewSet):
 
         engine = LoanEligibilityEngine(profile, product)
         amount = serializer.validated_data.get("amount")
+        term = serializer.validated_data.get("term_months")
         result = engine.evaluate(amount)
 
-        return Response(result.to_dict())
+        data = result.to_dict()
+
+        # When the member has told us the amount and the term, price the
+        # loan in the same breath — one call, one answer.
+        if amount is not None and term:
+            try:
+                quote = calculate_repayment(
+                    amount,
+                    product.interest_rate,
+                    term,
+                    method=product.interest_method,
+                )
+            except InterestCalculationError as exc:
+                return Response({"detail": str(exc)}, status=400)
+            data["quote"] = quote.to_dict()
+
+        return Response(data)
+
+
+class LoanQuoteView(viewsets.ViewSet):
+    """
+    Price a loan before applying.
+    POST /api/v1/loans/quote/
+    """
+
+    permission_classes = [IsTenantMember]
+
+    def create(self, request):
+        serializer = LoanQuoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        product = LoanProduct.objects.filter(
+            tenant=request.tenant, id=serializer.validated_data["loan_product_id"]
+        ).first()
+
+        if not product:
+            return Response({"detail": "Loan product not found."}, status=404)
+
+        term = serializer.validated_data["term_months"]
+        max_term = effective_max_term_months(request.tenant, product)
+
+        if term > max_term:
+            return Response(
+                {"detail": f"The repayment term must not exceed {max_term} months."},
+                status=400,
+            )
+
+        try:
+            quote = calculate_repayment(
+                serializer.validated_data["amount"],
+                product.interest_rate,
+                term,
+                method=product.interest_method,
+            )
+        except InterestCalculationError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        return Response(quote.to_dict())
 
 
 class LoanViewSet(TenantScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):

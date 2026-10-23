@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from common.mixins import TenantScopedViewSetMixin
-from common.permissions import IsExecutiveOrAbove
+from common.permissions import HasTenantPermission
 
 from .services import get_contribution_performance, get_executive_dashboard_summary
 
@@ -14,8 +14,14 @@ from .services import get_contribution_performance, get_executive_dashboard_summ
 class ExecutiveDashboardViewSet(TenantScopedViewSetMixin, viewsets.ViewSet):
     """
     API for executive reporting dashboards.
+
+    Gated on the `view_reports` permission rather than a role code, so a
+    read-only COMMITTEE_MEMBER can open the dashboard — it holds that
+    permission — while a plain MEMBER cannot, because it holds none.
     """
-    permission_classes = [IsExecutiveOrAbove]
+
+    permission_classes = [HasTenantPermission]
+    required_permissions = ["view_reports"]
 
     @action(detail=False, methods=["get"])
     def summary(self, request):

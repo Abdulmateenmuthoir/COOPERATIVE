@@ -33,6 +33,50 @@ class IsPlatformAdmin(BasePermission):
         )
 
 
+class IsPlatformAdminOrSocietyAdmin(BasePermission):
+    """
+    Allows platform administrators, or the SOCIETY_ADMIN of the tenant that
+    is being acted upon.
+
+    Platform admins may act on any tenant. A society admin may only act on
+    the society they administer — the check is made against the resolved
+    object, so a society admin can never reach another society's
+    configuration even though the route lives under /platform/.
+
+    Use with a viewset that calls `get_object()` (or DRF's
+    `check_object_permissions`) so the object-level check runs.
+    """
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Platform admins bypass role checks.
+        if request.user.is_platform_user:
+            return True
+
+        from apps.users.models import Membership
+
+        return Membership.objects.filter(
+            user=request.user,
+            status=Membership.Status.ACTIVE,
+            role__code="SOCIETY_ADMIN",
+        ).exists()
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_platform_user:
+            return True
+
+        from apps.users.models import Membership
+
+        return Membership.objects.filter(
+            tenant=obj,
+            user=request.user,
+            status=Membership.Status.ACTIVE,
+            role__code="SOCIETY_ADMIN",
+        ).exists()
+
+
 class IsTenantMember(BasePermission):
     """
     Allows access only to authenticated users who are active members

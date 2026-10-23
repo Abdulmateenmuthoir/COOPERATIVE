@@ -58,6 +58,13 @@ class TenantMiddleware(MiddlewareMixin):
         tenant_id = self._resolve_tenant_id(request, user)
 
         if not tenant_id:
+            # Platform administrators are cross-tenant by design and carry no
+            # tenant claim of their own. Let them through without one — the
+            # tenant-scoped views still refuse them, because
+            # TenantScopedViewSetMixin and IsTenantMember both require a
+            # resolved tenant. Without this they could not even log out.
+            if user.is_platform_user:
+                return None
             return JsonResponse(
                 {
                     "error": "Tenant context required",

@@ -2,8 +2,10 @@
 Users app views — Authentication, Member Management, and RBAC.
 """
 from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -12,6 +14,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from common.mixins import TenantScopedViewSetMixin
 from common.permissions import IsExecutiveOrAbove, IsSocietyAdmin, IsTenantMember
 
+from apps.auditing.services import create_audit_log
+
+from .filters import MemberSearchFilter
 from .models import (
     MemberProfile,
     Membership,
@@ -22,8 +27,10 @@ from .models import (
 )
 from .serializers import (
     CustomTokenObtainPairSerializer,
+    GuarantorCandidateSerializer,
     MemberCreateSerializer,
     MemberDetailSerializer,
+    MemberDirectorySerializer,
     MemberProfileSerializer,
     MemberRoleUpdateSerializer,
     MembershipStatusUpdateSerializer,
@@ -164,18 +171,117 @@ class MemberViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
 
     queryset = Membership.objects.select_related("user", "role")
     serializer_class = MemberDetailSerializer
+    search_fields = ["user__email", "user__first_name", "user__last_name"]
+    filterset_fields = ["status", "role__code"]
+    ordering_fields = ["created_at", "status"]
+    # The default SearchFilter cannot express "employee number, but only
+    # within my own society" — see MemberSearchFilter.
+    filter_backends = [
+        DjangoFilterBackend,
+        MemberSearchFilter,
+        OrderingFilter,
+    ]
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
             return [IsTenantMember()]
+        if self.action == "guarantor_candidates":
+            return [IsTenantMember()]
         if self.action == "create":
-            return [IsSocietyAdmin()]
-        return [IsExecutiveOrAbove()]
+            # Required permission: manage_members.
+            # Falls back to society-admin role check for backwards compatibility.
+            if self.request.role == "SOCIETY_ADMIN":
+                return [IsSocietyAdmin()]
+            return [HasTenantPermission(permission_code="manage_members")]
+        if self.action in ["update_status", "change_role"]:
+            # Required permissions: manage_roles and manage_members.
+            # Falls back to society-admin role check for backwards compatibility.
+            if self.request.role == "SOCIETY_ADMIN":
+                return [IsSocietyAdmin()]
+            # Check manage_members first, then manage_roles
+            perms = []
+            if HasTenantPermission(permission_code="manage_members"):
+                perms.append(HasTenantPermission(permission_code="manage_members"))
+            if HasTenantPermission(permission_code="manage_roles"):
+                perms.append(HasTenantPermission(permission_code="manage_roles"))
+            return perms if perms else [IsSocietyAdmin()]
+        if self.action == "profile":
+            # Any active member may read their own profile; society admin may
+            # read/write any profile.
+            if self.request.role == "SOCIETY_ADMIN":
+                return [HasTenantPermission(permission_code="manage_members")]
+            return [IsTenantMember()]
+        if self.action == "pending_members":
+            # Required permission: manage_members.
+            if self.request.role == "SOCIETY_ADMIN":
+                return [IsSocietyAdmin()]
+            return [HasTenantPermission(permission_code="manage_members")]
+        return [IsSocietyAdmin()]
 
     def get_serializer_class(self):
         if self.action == "create":
             return MemberCreateSerializer
+        if self.action == "guarantor_candidates":
+            return GuarantorCandidateSerializer
+        if self.action in ["list", "retrieve"]:
+            # A member may read the directory, but only someone who manages
+            # members may read the full record behind each entry.
+            if self._viewer_manages_members():
+                return MemberDetailSerializer
+            return MemberDirectorySerializer
         return MemberDetailSerializer
+
+    def _viewer_manages_members(self):
+        """
+        True when the caller may read full member records.
+
+        Managing members and roles is a society-admin act, so the full
+        record — the profile with its employee number, payroll number, date
+        of birth, next-of-kin details and bank coordinates — is reserved for
+        that role. Everyone else in the society sees the directory.
+        """
+        user = self.request.user
+        if user.is_platform_user:
+            return True
+
+        membership = Membership.objects.filter(
+            tenant=self.request.tenant,
+            user=user,
+            status=Membership.Status.ACTIVE,
+        ).select_related("role").first()
+
+        return bool(membership and membership.role.code == "SOCIETY_ADMIN")
+
+    @action(detail=False, methods=["get"], url_path="guarantor-candidates")
+    def guarantor_candidates(self, request):
+        """
+        GET /api/v1/members/guarantor-candidates/
+
+        Active members of this society who can be named as a guarantor, with
+        just enough detail to pick one. Used by the loan application form, so
+        a member does not have to be handed the whole roster — or anybody
+        else's employee and payroll numbers — to choose a guarantor.
+        """
+        candidates = (
+            Membership.objects.filter(
+                tenant=request.tenant,
+                status=Membership.Status.ACTIVE,
+            )
+            .exclude(user=request.user)
+            .select_related("user")
+            .order_by("user__first_name", "user__last_name")
+        )
+
+        # Only members who actually have a profile can be a guarantor.
+        candidates = [
+            c for c in candidates
+            if MemberProfile.objects.filter(
+                tenant=request.tenant, user=c.user
+            ).exists()
+        ]
+
+        serializer = GuarantorCandidateSerializer(candidates, many=True)
+        return Response(serializer.data)
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -195,13 +301,35 @@ class MemberViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
         """
         PATCH /api/v1/members/{id}/status/
         Approve, suspend, or remove a member. SOCIETY_ADMIN only.
+
+        The reason the UI asks for is recorded in the audit trail, so the
+        record says why a membership changed rather than only that it did.
         """
         membership = self.get_object()
+        previous_status = membership.status
+
         serializer = MembershipStatusUpdateSerializer(
             membership, data=request.data, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
         serializer.update(membership, serializer.validated_data)
+
+        reason = (serializer.validated_data.get("reason") or "").strip()
+
+        create_audit_log(
+            request=request,
+            action_code="membership_status_changed",
+            action_category="update",
+            description=(
+                f"Membership {previous_status} -> {membership.status}"
+                + (f": {reason}" if reason else "")
+            ),
+            entity_type="Membership",
+            entity_id=str(membership.id),
+            before_state={"status": previous_status},
+            after_state={"status": membership.status, "reason": reason},
+        )
+
         return Response(MemberDetailSerializer(membership).data)
 
     @action(detail=True, methods=["put"], url_path="role")

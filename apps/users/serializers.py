@@ -38,25 +38,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         data = super().validate(attrs)
-        tenant_code = self.initial_data.get("tenant_code", "")
+        tenant_code = (self.initial_data.get("tenant_code") or "").strip()
 
-        if tenant_code and not self.user.is_platform_user:
-            from apps.core.models import Tenant
-
-            try:
-                tenant = Tenant.objects.get(code=tenant_code, status=Tenant.Status.ACTIVE)
-            except Tenant.DoesNotExist:
-                raise serializers.ValidationError({"tenant_code": "Invalid or inactive cooperative society."})
-
-            # Verify membership
-            membership = Membership.objects.filter(
-                tenant=tenant, user=self.user, status=Membership.Status.ACTIVE
-            ).select_related("role").first()
-
-            if not membership:
-                raise serializers.ValidationError(
-                    {"tenant_code": "You are not an active member of this cooperative society."}
-                )
+        if not self.user.is_platform_user:
+            tenant, membership = self._resolve_society(tenant_code)
 
             # Inject tenant_id into the tokens
             from rest_framework_simplejwt.tokens import RefreshToken
@@ -87,6 +72,69 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         }
 
         return data
+
+    def _resolve_society(self, tenant_code):
+        """
+        Work out which cooperative society this login belongs to, and the
+        membership that gives the user their role.
+
+        A society code is optional when the user belongs to exactly one
+        society — asking them to type a code they can look up would be
+        needless friction. With no code and no membership (or more than one)
+        there is no unambiguous answer, so the login is refused with a
+        message that says what to do.
+        """
+        from apps.core.models import Tenant
+
+        if tenant_code:
+            try:
+                tenant = Tenant.objects.get(
+                    code=tenant_code, status=Tenant.Status.ACTIVE
+                )
+            except Tenant.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"tenant_code": "Invalid or inactive cooperative society."}
+                )
+
+            membership = (
+                Membership.objects.filter(
+                    tenant=tenant, user=self.user, status=Membership.Status.ACTIVE
+                )
+                .select_related("role")
+                .first()
+            )
+
+            if not membership:
+                raise serializers.ValidationError(
+                    {
+                        "tenant_code": "You are not an active member of this cooperative society."
+                    }
+                )
+
+            return tenant, membership
+
+        memberships = list(
+            Membership.objects.filter(
+                user=self.user, status=Membership.Status.ACTIVE
+            ).select_related("tenant", "role")
+        )
+
+        if not memberships:
+            raise serializers.ValidationError(
+                {
+                    "tenant_code": "You are not a member of any cooperative society. Enter your society code to continue."
+                }
+            )
+
+        if len(memberships) > 1:
+            raise serializers.ValidationError(
+                {
+                    "tenant_code": "You belong to more than one cooperative society. Enter your society code to choose the one to sign in to."
+                }
+            )
+
+        membership = memberships[0]
+        return membership.tenant, membership
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -243,6 +291,67 @@ class MemberDetailSerializer(serializers.ModelSerializer):
         return obj.status
 
 
+class MemberDirectorySerializer(serializers.ModelSerializer):
+    """
+    The society's member directory, without the institutional profile.
+
+    A plain member may see who is in their society — that is what the
+    guarantor picker needs — but the member profile carries employee and
+    payroll numbers, a date of birth, next-of-kin details and bank
+    coordinates, and none of that is any other member's business. So the
+    directory carries names, email and role only.
+    """
+
+    user = UserAccountSerializer(read_only=True)
+    role = serializers.SerializerMethodField()
+    membership_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Membership
+        fields = [
+            "id",
+            "user",
+            "role",
+            "membership_status",
+            "created_at",
+        ]
+
+    def get_role(self, obj):
+        return {"code": obj.role.code, "name": obj.role.name}
+
+    def get_membership_status(self, obj):
+        return obj.status
+
+
+class GuarantorCandidateSerializer(serializers.ModelSerializer):
+    """
+    A member who can be named as a guarantor.
+
+    Deliberately narrow: the picker needs a display name, an email to
+    disambiguate two people, and the profile id the API expects. It does not
+    need, and must not receive, the member's employee number, payroll
+    number or any other institutional detail.
+    """
+
+    full_name = serializers.SerializerMethodField()
+    email = serializers.SerializerMethodField()
+    profile_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Membership
+        fields = ["id", "full_name", "email", "profile_id"]
+
+    def get_full_name(self, obj):
+        return obj.user.full_name
+
+    def get_email(self, obj):
+        return obj.user.email
+
+    def get_profile_id(self, obj):
+        profile = MemberProfile.objects.filter(tenant=obj.tenant, user=obj.user).first()
+        return str(profile.id) if profile else None
+
+
 class MemberCreateSerializer(serializers.Serializer):
     """Serializer for creating a new member (admin-initiated)."""
 
@@ -338,9 +447,17 @@ class RoleSerializer(serializers.ModelSerializer):
 
 
 class MembershipStatusUpdateSerializer(serializers.Serializer):
-    """Serializer for approving/suspending/removing members."""
+    """
+    Serializer for approving/suspending/removing members.
+
+    `reason` is optional, but the UI asks for one whenever the change is
+    not an approval, and it is recorded in the audit trail.
+    """
 
     status = serializers.ChoiceField(choices=Membership.Status.choices)
+    reason = serializers.CharField(
+        max_length=500, required=False, allow_blank=True, default=""
+    )
 
     def update(self, instance, validated_data):
         instance.status = validated_data["status"]

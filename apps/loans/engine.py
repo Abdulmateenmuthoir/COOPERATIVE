@@ -13,6 +13,9 @@ from typing import Optional
 from django.db import transaction
 from django.utils import timezone
 
+from .interest import calculate_repayment
+from .services import effective_auto_approval_threshold
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,12 +39,18 @@ class EligibilityResult:
     # True when the guarantor rule is the *only* failing rule. The application is
     # not rejected in that case — it waits for guarantors to confirm.
     blocked_on_guarantors: bool = False
+    # The amount above which executive approval is required. This is the
+    # society's effective threshold, which the rule set may override.
+    approval_threshold: Optional[Decimal] = None
 
     def to_dict(self):
         return {
             "eligible": self.eligible,
             "max_borrowable": str(self.max_borrowable),
             "approval_mode": self.approval_mode,
+            "approval_threshold": (
+                str(self.approval_threshold) if self.approval_threshold is not None else None
+            ),
             "message": self.message,
             "blocked_on_guarantors": self.blocked_on_guarantors,
             "rules": [
@@ -98,7 +107,11 @@ class LoanEligibilityEngine:
         all_passed = all(r.passed for r in results)
         approval_mode = "auto"
 
-        if amount_requested is not None and amount_requested > self.product.auto_approval_threshold:
+        # The society's rule set may override the product's own threshold, so
+        # the escalation point is not read straight off the product.
+        threshold = effective_auto_approval_threshold(self.tenant, self.product)
+
+        if amount_requested is not None and amount_requested > threshold:
             approval_mode = "manual"
 
         # Missing guarantors are a "come back when they confirm", not a rejection.
@@ -121,6 +134,7 @@ class LoanEligibilityEngine:
             approval_mode=approval_mode,
             message=message,
             blocked_on_guarantors=blocked_on_guarantors,
+            approval_threshold=threshold,
         )
 
     def _check_membership_duration(self) -> RuleResult:
@@ -336,6 +350,7 @@ class LoanApprovalEngine:
         and is within the auto-approval threshold.
         """
         from apps.loans.models import Loan
+        from apps.notifications.services import notify_loan_decision
 
         application.status = application.Status.APPROVED
         application.save(update_fields=["status", "updated_at"])
@@ -345,6 +360,8 @@ class LoanApprovalEngine:
         # Update application status to disbursed (bursary model)
         application.status = application.Status.DISBURSED
         application.save(update_fields=["status", "updated_at"])
+
+        notify_loan_decision(application, "approved")
 
         logger.info(f"Loan auto-approved: {application}, loan_id={loan.id}")
         return loan
@@ -367,6 +384,7 @@ class LoanApprovalEngine:
         Manually approve a loan application after executive review.
         """
         from apps.loans.models import LoanApprovalStep
+        from apps.notifications.services import notify_loan_decision
 
         LoanApprovalStep.objects.create(
             tenant=application.tenant,
@@ -385,6 +403,8 @@ class LoanApprovalEngine:
         application.status = application.Status.DISBURSED
         application.save(update_fields=["status", "updated_at"])
 
+        notify_loan_decision(application, "approved")
+
         logger.info(f"Loan manually approved: {application}, loan_id={loan.id}")
         return loan
 
@@ -393,6 +413,7 @@ class LoanApprovalEngine:
     def reject(application, actor_user, reason, comments=""):
         """Reject a loan application."""
         from apps.loans.models import LoanApprovalStep
+        from apps.notifications.services import notify_loan_decision
 
         LoanApprovalStep.objects.create(
             tenant=application.tenant,
@@ -407,6 +428,8 @@ class LoanApprovalEngine:
         application.rejection_reason = reason
         application.save(update_fields=["status", "rejection_reason", "updated_at"])
 
+        notify_loan_decision(application, "rejected", reason)
+
         logger.info(f"Loan rejected: {application}, reason={reason}")
         return application
 
@@ -417,13 +440,16 @@ def _create_loan_from_application(application):
 
     product = application.loan_product
     principal = application.amount_requested
-    rate = product.interest_rate / Decimal("100")
     term = application.term_months
 
-    # Simple interest calculation
-    total_interest = principal * rate * Decimal(str(term)) / Decimal("12")
-    total_repayable = principal + total_interest
-    monthly_installment = total_repayable / Decimal(str(term))
+    # The same calculator that quotes the member a price before they apply
+    # writes the contract, so the two can never disagree.
+    quote = calculate_repayment(
+        principal,
+        product.interest_rate,
+        term,
+        method=product.interest_method,
+    )
 
     loan = Loan.objects.create(
         tenant=application.tenant,
@@ -431,23 +457,21 @@ def _create_loan_from_application(application):
         principal_amount=principal,
         approved_amount=principal,
         interest_rate=product.interest_rate,
+        interest_method=product.interest_method,
         term_months=term,
-        total_repayable=total_repayable,
-        monthly_installment=monthly_installment.quantize(Decimal("0.01")),
+        total_repayable=quote.total_repayable,
+        monthly_installment=quote.monthly_installment,
     )
 
     # Generate repayment schedule
-    principal_per_month = principal / Decimal(str(term))
-    interest_per_month = total_interest / Decimal(str(term))
-
-    for i in range(1, term + 1):
+    for installment in quote.installments:
         RepaymentSchedule.objects.create(
             tenant=application.tenant,
             loan=loan,
-            installment_no=i,
-            principal_component=principal_per_month.quantize(Decimal("0.01")),
-            interest_component=interest_per_month.quantize(Decimal("0.01")),
-            amount_due=monthly_installment.quantize(Decimal("0.01")),
+            installment_no=installment.installment_no,
+            principal_component=installment.principal_component,
+            interest_component=installment.interest_component,
+            amount_due=installment.amount_due,
         )
 
     # Record in financial ledger

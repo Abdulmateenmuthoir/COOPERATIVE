@@ -1,11 +1,14 @@
-"""
-Celery configuration for the Cooperative Management Platform.
-"""
+"""Celery configuration for the Cooperative Management Platform."""
 import os
+
+from __future__ import absolute_import, unicode_literals
 
 from celery import Celery
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
+os.environ.setdefault(
+    "DJANGO_SETTINGS_MODULE",
+    "config.settings." + os.getenv("DJANGO_ENV", "dev"),
+)
 
 app = Celery("cooperative_platform")
 

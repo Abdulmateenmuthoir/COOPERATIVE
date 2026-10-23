@@ -7,8 +7,8 @@ from .models import (
 
 @admin.register(LoanProduct)
 class LoanProductAdmin(admin.ModelAdmin):
-    list_display = ["tenant", "name", "max_amount", "interest_rate", "is_active"]
-    list_filter = ["is_active", "tenant"]
+    list_display = ["tenant", "name", "max_amount", "interest_rate", "interest_method", "is_active"]
+    list_filter = ["is_active", "interest_method", "tenant"]
 
 
 @admin.register(LoanApplication)
@@ -32,8 +32,8 @@ class LoanApprovalStepAdmin(admin.ModelAdmin):
 
 @admin.register(Loan)
 class LoanAdmin(admin.ModelAdmin):
-    list_display = ["application", "approved_amount", "interest_rate", "status", "opened_at"]
-    list_filter = ["status", "tenant"]
+    list_display = ["application", "approved_amount", "interest_rate", "interest_method", "status", "opened_at"]
+    list_filter = ["status", "interest_method", "tenant"]
 
 
 @admin.register(RepaymentSchedule)

@@ -8,7 +8,12 @@ from rest_framework.response import Response
 
 from apps.auditing.services import audit_action, create_audit_log
 from common.mixins import TenantScopedViewSetMixin
-from common.permissions import IsExecutiveOrAbove, IsTenantMember
+from common.permissions import (
+    HasTenantPermission,
+    IsExecutiveOrAbove,
+    IsSocietyAdmin,
+    IsTenantMember,
+)
 
 from .models import (
     ContributionCycle,
@@ -45,11 +50,22 @@ class ContributionPlanViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
 
     queryset = ContributionPlan.objects.all()
     serializer_class = ContributionPlanSerializer
+    search_fields = ["plan_name", "description"]
+    # `is_active` is a model property (effective date range), not a column, so
+    # it cannot be filtered server-side.
+    filterset_fields = ["is_default"]
+    ordering_fields = ["plan_name", "amount_fixed", "effective_from", "created_at"]
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
             return [IsTenantMember()]
-        return [IsExecutiveOrAbove()]
+        # Plans are society configuration, not a running task: creating,
+        # editing and ending them is a society-admin act.
+        # The `manage_contribution_plans` permission code is the formal gate;
+        # we fall back to the society-admin role check for backwards compatibility.
+        if self.request.role == "SOCIETY_ADMIN":
+            return [IsSocietyAdmin()]
+        return [HasTenantPermission(permission_code="manage_contribution_plans")]
 
 
 class ContributionCycleViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
@@ -60,11 +76,18 @@ class ContributionCycleViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = ContributionCycle.objects.all()
     serializer_class = ContributionCycleSerializer
 
+    # Reading a cycle's entries and penalties is an officer act, gated on the
+    # `view_financials` permission. EXECUTIVE, SOCIETY_ADMIN and the
+    # read-only COMMITTEE_MEMBER all hold it; a plain MEMBER does not, and
+    # must not see the society's contribution detail.
+    required_permissions = ["view_financials"]
+
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
             return [IsTenantMember()]
+        if self.action in ["entries", "penalties"]:
+            return [HasTenantPermission()]
         return [IsExecutiveOrAbove()]
-
     def perform_create(self, serializer):
         """Create a new cycle and auto-generate entries for all active members."""
         cycle = serializer.save(
@@ -176,14 +199,18 @@ class ContributionEntryViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
         return Response(ContributionEntrySerializer(updated_entry).data)
 
 
-class MyContributionsViewSet(TenantScopedViewSetMixin, viewsets.ViewSet):
+class MyContributionsViewSet(TenantScopedViewSetMixin, viewsets.GenericViewSet):
     """
     Member's own contribution views.
     GET /api/v1/contributions/my/
     GET /api/v1/contributions/my/balance/
+
+    A GenericViewSet, not a plain ViewSet: the list action paginates, and
+    `paginate_queryset` only exists on GenericAPIView.
     """
 
     permission_classes = [IsTenantMember]
+    serializer_class = ContributionEntrySerializer
 
     def list(self, request):
         """Get own contribution history."""
@@ -233,7 +260,11 @@ class FinancialLedgerViewSet(TenantScopedViewSetMixin, viewsets.ReadOnlyModelVie
 
     queryset = FinancialLedger.objects.all()
     serializer_class = FinancialLedgerSerializer
-    permission_classes = [IsExecutiveOrAbove]
+    # The ledger is the society's financial history. It is read-only, so a
+    # COMMITTEE_MEMBER — who holds `view_financials` — may read it, while a
+    # plain MEMBER, who holds no permissions, may not.
+    permission_classes = [HasTenantPermission]
+    required_permissions = ["view_financials"]
 
     def get_queryset(self):
         qs = super().get_queryset()

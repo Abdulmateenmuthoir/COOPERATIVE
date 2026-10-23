@@ -1,10 +1,11 @@
-"""
-WSGI config for cooperative_platform project.
-"""
+"""WSGI config for cooperative_platform project."""
 import os
 
 from django.core.wsgi import get_wsgi_application
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
+os.environ.setdefault(
+    "DJANGO_SETTINGS_MODULE",
+    "config.settings." + os.getenv("DJANGO_ENV", "dev"),
+)
 
 application = get_wsgi_application()

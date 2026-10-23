@@ -30,13 +30,14 @@ class ContributionCycleSerializer(serializers.ModelSerializer):
     period_display = serializers.ReadOnlyField()
     entry_count = serializers.SerializerMethodField()
     confirmed_count = serializers.SerializerMethodField()
+    generated_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = ContributionCycle
         fields = [
             "id", "cycle_month", "cycle_year", "period_display", "status",
-            "generated_by", "generated_at", "closed_at", "notes",
-            "entry_count", "confirmed_count", "created_at",
+            "generated_by", "generated_by_name", "generated_at", "closed_at",
+            "notes", "entry_count", "confirmed_count", "created_at",
         ]
         read_only_fields = ["id", "generated_by", "generated_at", "closed_at", "created_at"]
 
@@ -46,19 +47,26 @@ class ContributionCycleSerializer(serializers.ModelSerializer):
     def get_confirmed_count(self, obj):
         return obj.entries.filter(status=ContributionEntry.Status.CONFIRMED).count()
 
+    def get_generated_by_name(self, obj):
+        """Display name of the officer who generated the cycle."""
+        if not obj.generated_by:
+            return None
+        return obj.generated_by.full_name
+
 
 class ContributionEntrySerializer(serializers.ModelSerializer):
     member_name = serializers.SerializerMethodField()
     member_email = serializers.SerializerMethodField()
     member_payroll_no = serializers.SerializerMethodField()
+    confirmed_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = ContributionEntry
         fields = [
             "id", "cycle", "member_profile", "member_name", "member_email",
             "member_payroll_no", "entry_type", "amount_due", "amount_received",
-            "source_reference", "status", "confirmed_by", "confirmed_at",
-            "created_at",
+            "source_reference", "status", "confirmed_by", "confirmed_by_name",
+            "confirmed_at", "created_at",
         ]
         read_only_fields = ["id", "confirmed_by", "confirmed_at", "created_at"]
 
@@ -70,6 +78,12 @@ class ContributionEntrySerializer(serializers.ModelSerializer):
 
     def get_member_payroll_no(self, obj):
         return obj.member_profile.payroll_no
+
+    def get_confirmed_by_name(self, obj):
+        """Display name of the officer who confirmed the entry."""
+        if not obj.confirmed_by:
+            return None
+        return obj.confirmed_by.full_name
 
 
 class ContributionConfirmSerializer(serializers.Serializer):
@@ -89,18 +103,25 @@ class BulkConfirmSerializer(serializers.Serializer):
 
 class PenaltyEntrySerializer(serializers.ModelSerializer):
     member_name = serializers.SerializerMethodField()
+    waived_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = PenaltyEntry
         fields = [
             "id", "member_profile", "member_name", "cycle", "penalty_type",
-            "amount", "reason", "status", "waived_by", "waived_reason",
-            "created_at",
+            "amount", "reason", "status", "waived_by", "waived_by_name",
+            "waived_reason", "created_at",
         ]
         read_only_fields = ["id", "created_at"]
 
     def get_member_name(self, obj):
         return obj.member_profile.user.full_name
+
+    def get_waived_by_name(self, obj):
+        """Display name of the officer who waived the penalty."""
+        if not obj.waived_by:
+            return None
+        return obj.waived_by.full_name
 
 
 class FinancialLedgerSerializer(serializers.ModelSerializer):
