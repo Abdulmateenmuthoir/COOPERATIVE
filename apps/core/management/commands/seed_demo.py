@@ -267,6 +267,7 @@ class Command(BaseCommand):
         membership, _ = Membership.objects.get_or_create(
             tenant=tenant, user=user,
             defaults={
+                "role": role,
                 "status": Membership.Status.ACTIVE,
                 "approved_at": timezone.now(),
             },

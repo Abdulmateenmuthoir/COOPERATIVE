@@ -37,6 +37,18 @@ services:
         fromDatabase:
           name: acada-cooperative-db
           property: connectionString
+      - key: REDIS_URL
+        fromDatabase:
+          name: acada-cooperative-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromDatabase:
+          name: acada-cooperative-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromDatabase:
+          name: acada-cooperative-redis
+          property: connectionString
       - key: JWT_ACCESS_TOKEN_LIFETIME_MINUTES
         value: "30"
       - key: JWT_REFRESH_TOKEN_LIFETIME_DAYS
@@ -48,3 +60,8 @@ databases:
     user: coop_user
     plan: free
     region: frankfurt
+  - name: acada-cooperative-redis
+    type: redis
+    plan: free
+    region: frankfurt
+    maxmemoryPolicy: allkeys-lru
