@@ -1,7 +1,14 @@
 """
 Users app views — Authentication, Member Management, and RBAC.
 """
+from django import forms
+from django.contrib.auth import get_user_model, password_validation
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth.tokens import default_token_generator
+from django.shortcuts import render
 from django.utils import timezone
+from django.utils.http import urlsafe_base64_decode
+from django.views import View
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
@@ -11,7 +18,6 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-
 from common.mixins import TenantScopedViewSetMixin
 from common.permissions import (
     HasTenantPermission,
@@ -50,6 +56,97 @@ from .serializers import (
 
 
 # ─── Auth Views ────────────────────────────────────────────────────────
+
+
+class InvitationAcceptForm(forms.Form):
+    temporary_password = forms.CharField(
+        label="Temporary password from your email",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "current-password"}),
+    )
+    new_password = forms.CharField(
+        label="New password",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
+    confirm_password = forms.CharField(
+        label="Confirm new password",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
+
+    def __init__(self, user, *args, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+
+    def clean(self):
+        cleaned = super().clean()
+        temporary = cleaned.get("temporary_password")
+        new_password = cleaned.get("new_password")
+        confirmation = cleaned.get("confirm_password")
+
+        if temporary and not self.user.check_password(temporary):
+            self.add_error("temporary_password", "The temporary password does not match.")
+        if new_password and confirmation and new_password != confirmation:
+            self.add_error("confirm_password", "The passwords do not match.")
+        if new_password:
+            try:
+                password_validation.validate_password(new_password, self.user)
+            except DjangoValidationError as exc:
+                self.add_error("new_password", exc)
+        return cleaned
+
+
+class InvitationAcceptView(View):
+    """Render a one-time password setup page for admin-created accounts."""
+
+    template_name = "users/accept_invitation.html"
+
+    def _get_user(self, uidb64, token):
+        try:
+            user_id = urlsafe_base64_decode(uidb64).decode()
+            user = get_user_model().objects.get(pk=user_id)
+        except (
+            ValueError,
+            TypeError,
+            OverflowError,
+            UnicodeDecodeError,
+            DjangoValidationError,
+            get_user_model().DoesNotExist,
+        ):
+            return None
+
+        if not user.must_change_password or not default_token_generator.check_token(user, token):
+            return None
+        return user
+
+    def get(self, request, uidb64, token):
+        user = self._get_user(uidb64, token)
+        return render(
+            request,
+            self.template_name,
+            {"valid_link": user is not None, "uidb64": uidb64, "token": token},
+            status=200 if user else 400,
+        )
+
+    def post(self, request, uidb64, token):
+        user = self._get_user(uidb64, token)
+        if user is None:
+            return render(request, self.template_name, {"valid_link": False}, status=400)
+
+        form = InvitationAcceptForm(user, request.POST)
+        if form.is_valid():
+            user.set_password(form.cleaned_data["new_password"])
+            user.must_change_password = False
+            user.save(update_fields=["password", "must_change_password"])
+            return render(request, self.template_name, {"complete": True})
+
+        return render(
+            request,
+            self.template_name,
+            {"valid_link": True, "uidb64": uidb64, "token": token, "form": form},
+            status=400,
+        )
 
 
 class LoginView(TokenObtainPairView):

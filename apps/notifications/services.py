@@ -2,9 +2,37 @@
 Notification service.
 Used to dispatch in-app, email, and SMS notifications.
 """
+import logging
+from functools import partial
+
+from django.db import transaction
+
 from .models import Notification
 
-def send_notification(user, title, message, notification_type=Notification.NotificationType.INFO, context_data=None, channels=[Notification.Channel.IN_APP], tenant=None):
+logger = logging.getLogger(__name__)
+
+
+def queue_email(recipient, subject, text_content, html_content=""):
+    """Queue email after the surrounding database transaction commits."""
+    from .tasks import send_email_task
+
+    try:
+        transaction.on_commit(partial(
+            send_email_task.delay, recipient, subject, text_content, html_content
+        ))
+    except Exception:
+        logger.exception("Could not queue email to %s subject=%r", recipient, subject)
+
+
+def send_notification(
+    user,
+    title,
+    message,
+    notification_type=Notification.NotificationType.INFO,
+    context_data=None,
+    channels=None,
+    tenant=None,
+):
     """
     Core function to dispatch notifications.
 
@@ -13,6 +41,9 @@ def send_notification(user, title, message, notification_type=Notification.Notif
     user's first membership, which is wrong for users who belong to more
     than one society.
     """
+    if channels is None:
+        channels = [Notification.Channel.IN_APP, Notification.Channel.EMAIL]
+
     # 1. Create In-App Notification (Always created if IN_APP or ALL is selected)
     if Notification.Channel.IN_APP in channels or Notification.Channel.ALL in channels:
         if tenant is None and user.memberships.exists():
@@ -27,11 +58,9 @@ def send_notification(user, title, message, notification_type=Notification.Notif
             context_data=context_data
         )
 
-    # 2. Dispatch Email (Using Celery - Placeholder)
+    # 2. Send email asynchronously through Brevo (or the configured local backend).
     if Notification.Channel.EMAIL in channels or Notification.Channel.ALL in channels:
-        # from .tasks import send_email_task
-        # send_email_task.delay(user.email, title, message)
-        pass
+        queue_email(user.email, title, message)
 
     # 3. Dispatch SMS (Using Celery - Placeholder)
     if Notification.Channel.SMS in channels or Notification.Channel.ALL in channels:
@@ -46,7 +75,8 @@ def notify_membership_pending(membership):
         user=membership.user,
         title="Membership Pending Approval",
         message=f"Your membership request for {membership.tenant.name} is pending approval.",
-        notification_type=Notification.NotificationType.INFO
+        notification_type=Notification.NotificationType.INFO,
+        tenant=membership.tenant,
     )
 
 
@@ -57,8 +87,37 @@ def notify_membership_approved(membership):
         title="Membership Approved",
         message=f"Welcome! Your membership for {membership.tenant.name} has been approved.",
         notification_type=Notification.NotificationType.SUCCESS,
-        channels=[Notification.Channel.IN_APP, Notification.Channel.EMAIL]
+        channels=[Notification.Channel.IN_APP, Notification.Channel.EMAIL],
+        tenant=membership.tenant,
     )
+
+
+def notify_member_invitation(user, tenant, temporary_password, continuation_url):
+    """Email a new account's temporary password and one-time password setup link."""
+    from html import escape
+
+    name = escape(user.full_name)
+    society = escape(tenant.name)
+    safe_password = escape(temporary_password)
+    safe_url = escape(continuation_url, quote=True)
+    subject = f"Your {tenant.name} cooperative account is ready"
+    text = (
+        f"Hello {user.full_name},\n\n"
+        f"Your account for {tenant.name} has been created. Your temporary password is: "
+        f"{temporary_password}\n\n"
+        "Continue using this one-time link to choose a permanent password:\n"
+        f"{continuation_url}\n\n"
+        "The link expires after 24 hours and becomes invalid after it is used."
+    )
+    html = (
+        "<html><body>"
+        f"<p>Hello {name},</p><p>Your account for <strong>{society}</strong> is ready.</p>"
+        f"<p>Your temporary password: <strong>{safe_password}</strong></p>"
+        f'<p><a href="{safe_url}">Continue and choose a permanent password</a></p>'
+        "<p>This one-time link expires after 24 hours and becomes invalid after use.</p>"
+        "</body></html>"
+    )
+    queue_email(user.email, subject, text, html)
 
 
 # ─── Loan notifications ─────────────────────────────────────────────────

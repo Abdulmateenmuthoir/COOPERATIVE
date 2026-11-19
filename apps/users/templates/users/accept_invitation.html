@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set your password</title>
+  <style>
+    body { margin: 0; padding: 2rem 1rem; background: #f3f4f6; color: #172033; font: 16px/1.5 system-ui, sans-serif; }
+    main { box-sizing: border-box; max-width: 440px; margin: 8vh auto; padding: 2rem; background: white; border-radius: 12px; box-shadow: 0 8px 30px #17203318; }
+    h1 { margin-top: 0; font-size: 1.5rem; }
+    label { display: block; margin: 1rem 0 .35rem; font-weight: 600; }
+    input { box-sizing: border-box; width: 100%; padding: .75rem; border: 1px solid #b9c1cf; border-radius: 6px; font: inherit; }
+    button { margin-top: 1.25rem; padding: .75rem 1rem; border: 0; border-radius: 6px; background: #1a56db; color: white; font: inherit; font-weight: 600; cursor: pointer; }
+    .error { color: #a61b1b; }
+    .success { color: #176b38; }
+  </style>
+</head>
+<body>
+<main>
+  {% if complete %}
+    <h1 class="success">Password set</h1>
+    <p>Your one-time link has been used. You can now sign in to your cooperative account with your new password.</p>
+  {% elif not valid_link %}
+    <h1>This link is no longer valid</h1>
+    <p>Invitation links expire after 24 hours and can only be used once. Ask your cooperative administrator to send a new invitation.</p>
+  {% else %}
+    <h1>Choose a permanent password</h1>
+    <p>Your invitation link is valid. Enter the temporary password from your email, then choose a permanent password.</p>
+    {% if form.non_field_errors %}<p class="error">{{ form.non_field_errors }}</p>{% endif %}
+    <form method="post">
+      {% csrf_token %}
+      <label for="id_temporary_password">Temporary password</label>
+      <input id="id_temporary_password" type="password" name="temporary_password" autocomplete="current-password" required>
+      {% if form.temporary_password.errors %}<p class="error">{{ form.temporary_password.errors }}</p>{% endif %}
+      <label for="id_new_password">New password</label>
+      <input id="id_new_password" type="password" name="new_password" autocomplete="new-password" required>
+      {% if form.new_password.errors %}<p class="error">{{ form.new_password.errors }}</p>{% endif %}
+      <label for="id_confirm_password">Confirm new password</label>
+      <input id="id_confirm_password" type="password" name="confirm_password" autocomplete="new-password" required>
+      {% if form.confirm_password.errors %}<p class="error">{{ form.confirm_password.errors }}</p>{% endif %}
+      <button type="submit">Set password</button>
+    </form>
+  {% endif %}
+</main>
+</body>
+</html>

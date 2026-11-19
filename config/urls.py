@@ -7,6 +7,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
+from django.views.generic import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
 from common.health import liveness, readiness
@@ -24,6 +25,9 @@ api_v1_patterns = [
 ]
 
 urlpatterns = [
+    # The repository is an API backend; send the site root to its API browser.
+    path("", RedirectView.as_view(pattern_name="swagger-ui", permanent=False), name="home"),
+
     # Health checks (unauthenticated, no DRF throttling)
     path("health/", liveness, name="health-liveness"),
     path("health/ready/", readiness, name="health-readiness"),

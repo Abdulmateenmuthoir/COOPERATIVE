@@ -4,6 +4,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 from apps.users.views import (
     CurrentUserView,
+    InvitationAcceptView,
     LoginView,
     LogoutView,
     PasswordChangeView,
@@ -11,6 +12,11 @@ from apps.users.views import (
 )
 
 urlpatterns = [
+    path(
+        "accept-invitation/<str:uidb64>/<str:token>/",
+        InvitationAcceptView.as_view(),
+        name="auth-accept-invitation",
+    ),
     path("login/", LoginView.as_view(), name="auth-login"),
     path("register/", RegisterView.as_view(), name="auth-register"),
     path("refresh/", TokenRefreshView.as_view(), name="auth-refresh"),

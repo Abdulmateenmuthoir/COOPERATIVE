@@ -38,6 +38,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         data = super().validate(attrs)
+        if self.user.must_change_password:
+            raise serializers.ValidationError({
+                "detail": "Set a permanent password using the one-time link in your email before signing in."
+            })
         tenant_code = (self.initial_data.get("tenant_code") or "").strip()
 
         if not self.user.is_platform_user:
@@ -412,8 +416,8 @@ class MemberCreateSerializer(serializers.Serializer):
             import secrets
             temp_password = secrets.token_urlsafe(12)
             user.set_password(temp_password)
+            user.must_change_password = True
             user.save()
-            # TODO: Send welcome email with temp password
 
         # Create membership
         role = Role.objects.filter(code=role_code).first()
@@ -433,6 +437,27 @@ class MemberCreateSerializer(serializers.Serializer):
             joined_at=timezone.now().date(),
             **profile_fields,
         )
+
+        if created:
+            from django.contrib.auth.tokens import default_token_generator
+            from django.urls import reverse
+            from django.utils.encoding import force_bytes
+            from django.utils.http import urlsafe_base64_encode
+
+            from apps.notifications.services import notify_member_invitation
+
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = default_token_generator.make_token(user)
+            path = reverse(
+                "auth-accept-invitation",
+                kwargs={"uidb64": uid, "token": token},
+            )
+            continuation_url = self.context["request"].build_absolute_uri(path)
+            notify_member_invitation(user, tenant, temp_password, continuation_url)
+        else:
+            from apps.notifications.services import notify_membership_approved
+
+            notify_membership_approved(membership)
 
         return membership
 

@@ -418,7 +418,18 @@ build never needs a C toolchain.
 | `CORS_ALLOWED_ORIGINS` | yes | The frontend origin, e.g. `https://acada.vercel.app`. No trailing slash. |
 | `DATABASE_URL` | yes | `postgres://…` — Render's *internal* connection string. `sslmode` is honoured if present. |
 | `DEBUG` | no | Never set it on Render; the app raises if `DEBUG=True` and `RENDER` is set. |
-| `EMAIL_BACKEND` | no | Defaults to the console backend; nothing sends mail yet. |
+| `BREVO_API_KEY` | production | Brevo transactional email API key. When set, queued event emails are sent through Brevo. |
+| `BREVO_SENDER_EMAIL` | production | Verified Brevo sender address. |
+| `BREVO_SENDER_NAME` | no | Sender display name. |
+| `EMAIL_BACKEND` | no | Used when `BREVO_API_KEY` is empty; defaults to Django's console backend locally. |
+| `PASSWORD_RESET_TIMEOUT` | no | Invitation link lifetime in seconds; defaults to 86400 (24 hours). |
+
+Emails are queued through Celery. The worker retries temporary network errors and
+Brevo rate limit/server responses up to five times. Admin-created members receive
+a temporary password plus a one-time link to set a permanent password; they cannot
+sign in until they complete that step. The page asks them to confirm the temporary
+password before setting their permanent password. The invitation page is served by the API at
+`/api/v1/auth/accept-invitation/<uid>/<token>/`.
 
 `config/settings/prod.py` derives `SECURE_PROXY_SSL_HEADER`, HTTPS redirect,
 secure cookies, HSTS and `CONN_MAX_AGE` from these. `SECURE_REDIRECT_EXEMPT`

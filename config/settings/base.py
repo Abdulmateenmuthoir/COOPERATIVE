@@ -223,6 +223,10 @@ EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@cooperative-platform.com")
+BREVO_API_KEY = config("BREVO_API_KEY", default="")
+BREVO_SENDER_EMAIL = config("BREVO_SENDER_EMAIL", default="")
+BREVO_SENDER_NAME = config("BREVO_SENDER_NAME", default="Cooperative Management Platform")
+PASSWORD_RESET_TIMEOUT = config("PASSWORD_RESET_TIMEOUT", default=60 * 60 * 24, cast=int)
 
 # ─── Platform Constants ────────────────────────────────────────────────
 PLATFORM_NAME = config("PLATFORM_NAME", default="Cooperative Management Platform")

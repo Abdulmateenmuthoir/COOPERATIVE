@@ -72,6 +72,10 @@ class UserAccount(AbstractBaseUser, PermissionsMixin):
         default=False,
         help_text="Designates whether this user is a platform administrator (SUPER_ADMIN).",
     )
+    must_change_password = models.BooleanField(
+        default=False,
+        help_text="Whether login must wait until the user sets a permanent password.",
+    )
     is_staff = models.BooleanField(default=False, help_text="Designates whether the user can access the Django admin.")
     is_active = models.BooleanField(default=True)
 
