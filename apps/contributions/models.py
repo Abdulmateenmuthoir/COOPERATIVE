@@ -41,6 +41,14 @@ class ContributionPlan(TenantScopedModel):
         null=True, blank=True, help_text="Date until which this plan is effective. Null = currently active."
     )
     description = models.TextField(blank=True, default="")
+    minimum_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    qualifying_membership_months = models.PositiveIntegerField(null=True, blank=True)
+    qualifying_periods = models.PositiveIntegerField(null=True, blank=True)
+    minimum_paid_periods = models.PositiveIntegerField(null=True, blank=True)
+    minimum_paid_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    grace_period_days = models.PositiveIntegerField(default=0)
+    withdrawal_policy = models.CharField(max_length=30, default="exit_only")
+    policy_version = models.PositiveIntegerField(default=1)
 
     class Meta:
         ordering = ["-effective_from"]
@@ -114,6 +122,9 @@ class ContributionEntry(TenantScopedModel):
         CONFIRMED = "confirmed", "Confirmed"
         MISSED = "missed", "Missed"
         PARTIAL = "partial", "Partially Received"
+        LATE = "late", "Late"
+        REVERSED = "reversed", "Reversed"
+        ADJUSTED = "adjusted", "Adjusted"
 
     cycle = models.ForeignKey(ContributionCycle, on_delete=models.CASCADE, related_name="entries")
     member_profile = models.ForeignKey(
@@ -134,6 +145,12 @@ class ContributionEntry(TenantScopedModel):
         max_length=200, blank=True, default="",
         help_text="Bursary reference or deduction schedule ID.",
     )
+    contribution_agreement = models.ForeignKey(
+        "contributions.MemberContributionAgreement", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="entries",
+    )
+    policy_version = models.PositiveIntegerField(default=1)
+    rule_snapshot = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
     confirmed_by = models.ForeignKey(
         "users.UserAccount",
@@ -247,6 +264,154 @@ class FinancialLedger(TenantScopedModel):
         if self.pk and FinancialLedger.objects.filter(pk=self.pk).exists():
             raise ValueError("Ledger entries are immutable. Use FinancialAdjustment for corrections.")
         super().save(*args, **kwargs)
+
+
+class ShareProduct(TenantScopedModel):
+    """Versioned share issue terms; share capital is separate from savings."""
+    class OwnershipModel(models.TextChoices):
+        UNITARY = "unitary", "One unit per member"
+        MULTI = "multi", "Multiple units per member"
+
+    name = models.CharField(max_length=120)
+    code = models.SlugField(max_length=50)
+    description = models.TextField(blank=True, default="")
+    price_per_unit = models.DecimalField(max_digits=12, decimal_places=2)
+    ownership_model = models.CharField(max_length=12, choices=OwnershipModel.choices)
+    min_units = models.PositiveIntegerField(default=1)
+    max_units = models.PositiveIntegerField(null=True, blank=True)
+    authorized_units = models.PositiveIntegerField(null=True, blank=True)
+    issued_units = models.PositiveIntegerField(default=0)
+    version = models.PositiveIntegerField(default=1)
+    effective_from = models.DateField()
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = [("tenant", "code", "version")]
+        ordering = ["code", "-version"]
+
+
+class Shareholding(TenantScopedModel):
+    """Member share register. Only issued and fully paid units qualify by default."""
+    class Status(models.TextChoices):
+        SUBSCRIBED = "subscribed", "Subscribed"
+        PART_PAID = "part_paid", "Part paid"
+        PAID = "paid", "Paid"
+        CANCELLED = "cancelled", "Cancelled"
+
+    product = models.ForeignKey(ShareProduct, on_delete=models.PROTECT, related_name="holdings")
+    member_profile = models.ForeignKey("users.MemberProfile", on_delete=models.PROTECT, related_name="shareholdings")
+    units = models.PositiveIntegerField()
+    units_paid = models.PositiveIntegerField(default=0)
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.SUBSCRIBED)
+    certificate_reference = models.CharField(max_length=100, blank=True, default="")
+    issued_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class ShareTransaction(TenantScopedModel):
+    """Append-only share capital events, separate from FinancialLedger savings balances."""
+    class Event(models.TextChoices):
+        SUBSCRIPTION = "subscription", "Subscription"
+        PAYMENT = "payment", "Payment"
+        ISSUE = "issue", "Issue"
+        DIVIDEND = "dividend", "Dividend"
+        REVERSAL = "reversal", "Reversal"
+
+    holding = models.ForeignKey(Shareholding, on_delete=models.PROTECT, related_name="transactions")
+    event = models.CharField(max_length=20, choices=Event.choices)
+    units = models.PositiveIntegerField(default=0)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reference = models.CharField(max_length=120, blank=True, default="")
+    actor = models.ForeignKey("users.UserAccount", on_delete=models.PROTECT)
+    note = models.TextField(blank=True, default="")
+
+
+class DividendDeclaration(TenantScopedModel):
+    class Status(models.TextChoices):
+        PROPOSED = "proposed", "Proposed"
+        APPROVED = "approved", "AGM approved"
+        CANCELLED = "cancelled", "Cancelled"
+
+    financial_year = models.CharField(max_length=20)
+    record_date = models.DateField()
+    per_share_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PROPOSED)
+    agm_reference = models.CharField(max_length=120, blank=True, default="")
+    proposed_by = models.ForeignKey("users.UserAccount", on_delete=models.PROTECT, related_name="proposed_dividends")
+    approved_by = models.ForeignKey("users.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="approved_dividends")
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+
+class ShareholdingSnapshot(TenantScopedModel):
+    declaration = models.ForeignKey(DividendDeclaration, on_delete=models.PROTECT, related_name="snapshots")
+    member_profile = models.ForeignKey("users.MemberProfile", on_delete=models.PROTECT, related_name="shareholding_snapshots")
+    product = models.ForeignKey(ShareProduct, on_delete=models.PROTECT, related_name="dividend_snapshots")
+    paid_units = models.PositiveIntegerField()
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    source_holding_ids = models.JSONField(default=list)
+
+    class Meta:
+        unique_together = [("declaration", "member_profile", "product")]
+
+
+class DividendEntitlement(TenantScopedModel):
+    class Status(models.TextChoices):
+        PROPOSED = "proposed", "Proposed"
+        PAYABLE = "payable", "Payable"
+        PAID = "paid", "Paid"
+        WITHHELD = "withheld", "Withheld"
+        REINVESTED = "reinvested", "Reinvested"
+        CANCELLED = "cancelled", "Cancelled"
+
+    declaration = models.ForeignKey(DividendDeclaration, on_delete=models.PROTECT, related_name="entitlements")
+    member_profile = models.ForeignKey("users.MemberProfile", on_delete=models.PROTECT, related_name="dividend_entitlements")
+    eligible_units = models.PositiveIntegerField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PROPOSED)
+    payment_reference = models.CharField(max_length=120, blank=True, default="")
+    recorded_by = models.ForeignKey("users.UserAccount", on_delete=models.PROTECT, null=True, blank=True)
+
+    class Meta:
+        unique_together = [("declaration", "member_profile")]
+
+
+class MemberContributionAgreement(TenantScopedModel):
+    """Approved member-specific compulsory contribution amount with effective dates."""
+    member_profile = models.ForeignKey("users.MemberProfile", on_delete=models.PROTECT, related_name="contribution_agreements")
+    plan = models.ForeignKey(ContributionPlan, on_delete=models.PROTECT, related_name="member_agreements")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    effective_from = models.DateField()
+    effective_to = models.DateField(null=True, blank=True)
+    reason = models.TextField()
+    policy_version = models.PositiveIntegerField(default=1)
+    approved_by = models.ForeignKey("users.UserAccount", on_delete=models.PROTECT, related_name="approved_contribution_agreements")
+
+
+class ExitRequest(TenantScopedModel):
+    """Member exit and compulsory-savings settlement workflow; no automatic offsets."""
+    class Status(models.TextChoices):
+        SUBMITTED = "submitted", "Submitted"
+        IN_REVIEW = "in_review", "In review"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        SETTLED = "settled", "Settled"
+
+    member_profile = models.ForeignKey("users.MemberProfile", on_delete=models.PROTECT, related_name="exit_requests")
+    requested_exit_date = models.DateField()
+    reason = models.TextField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.SUBMITTED)
+    gross_contribution_balance = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    deductions = models.JSONField(default=list, blank=True)
+    proposed_payable = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    decision_by = models.ForeignKey("users.UserAccount", on_delete=models.PROTECT, null=True, blank=True, related_name="exit_decisions")
+    decision_reason = models.TextField(blank=True, default="")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    policy_version = models.PositiveIntegerField(default=1)
+    payment_reference = models.CharField(max_length=120, blank=True, default="")
 
 
 class FinancialAdjustment(TenantScopedModel):

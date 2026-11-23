@@ -4,7 +4,7 @@ Contributions business logic — cycle generation, confirmation, and penalty cal
 import logging
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -51,12 +51,30 @@ def generate_cycle_entries(cycle):
         ).exists()
 
         if not existing:
+            from apps.contributions.models import MemberContributionAgreement
+            from datetime import date
+            period_date = date(cycle.cycle_year, cycle.cycle_month, 1)
+            agreement = MemberContributionAgreement.objects.filter(
+                tenant=tenant, member_profile=profile, plan=default_plan,
+                effective_from__lte=period_date,
+            ).filter(models.Q(effective_to__isnull=True) | models.Q(effective_to__gte=period_date)).order_by("-effective_from").first()
             ContributionEntry.objects.create(
                 tenant=tenant,
                 cycle=cycle,
                 member_profile=profile,
                 entry_type=ContributionEntry.EntryType.REGULAR,
-                amount_due=default_plan.amount_fixed,
+                amount_due=agreement.amount if agreement else default_plan.amount_fixed,
+                contribution_agreement=agreement,
+                policy_version=agreement.policy_version if agreement else default_plan.policy_version,
+                rule_snapshot={
+                    "minimum_amount": str(default_plan.minimum_amount) if default_plan.minimum_amount is not None else None,
+                    "qualifying_membership_months": default_plan.qualifying_membership_months,
+                    "qualifying_periods": default_plan.qualifying_periods,
+                    "minimum_paid_periods": default_plan.minimum_paid_periods,
+                    "minimum_paid_percentage": str(default_plan.minimum_paid_percentage) if default_plan.minimum_paid_percentage is not None else None,
+                    "grace_period_days": default_plan.grace_period_days,
+                    "withdrawal_policy": default_plan.withdrawal_policy,
+                },
                 status=ContributionEntry.Status.PENDING,
             )
             entries_created += 1
@@ -284,4 +302,13 @@ def get_member_contribution_summary(member_profile):
         "confirmed_count": summary["confirmed_count"] or 0,
         "missed_count": summary["missed_count"] or 0,
         "current_balance": get_member_balance(member_profile),
+        "compulsory_balance": sum(
+            ContributionEntry.objects.filter(
+                tenant=member_profile.tenant,
+                member_profile=member_profile,
+                entry_type=ContributionEntry.EntryType.REGULAR,
+                status__in=[ContributionEntry.Status.CONFIRMED, ContributionEntry.Status.PARTIAL],
+            ).values_list("amount_received", flat=True),
+            Decimal("0.00"),
+        ),
     }

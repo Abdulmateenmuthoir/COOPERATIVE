@@ -29,29 +29,24 @@ class LoanProduct(TenantScopedModel):
     description = models.TextField(blank=True, default="")
 
     # Eligibility rules
-    min_membership_months = models.PositiveIntegerField(
-        default=6, help_text="Minimum months of active membership required."
-    )
-    min_contribution_months = models.PositiveIntegerField(
-        default=6, help_text="Minimum consecutive months of confirmed contributions."
-    )
-    guarantor_required_count = models.PositiveSmallIntegerField(
-        default=2, help_text="Number of guarantors required."
-    )
+    min_membership_months = models.PositiveIntegerField(help_text="Minimum months of active membership required; configured per product.")
+    min_contribution_months = models.PositiveIntegerField(help_text="Minimum consecutive qualifying contribution periods.")
+    guarantor_required_count = models.PositiveSmallIntegerField(help_text="Number of guarantors required.")
 
     # Amount rules
+    min_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     max_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal("500000.00"),
+        max_digits=12, decimal_places=2, null=True, blank=True,
         help_text="Absolute maximum loan amount.",
     )
     max_multiplier = models.DecimalField(
-        max_digits=5, decimal_places=2, default=Decimal("2.00"),
+        max_digits=5, decimal_places=2,
         help_text="Maximum loan as a multiplier of total contributions (e.g., 2x savings).",
     )
 
     # Interest and terms
     interest_rate = models.DecimalField(
-        max_digits=5, decimal_places=2, default=Decimal("5.00"),
+        max_digits=5, decimal_places=2,
         help_text="Annual interest rate as a percentage.",
     )
     interest_method = models.CharField(
@@ -64,20 +59,27 @@ class LoanProduct(TenantScopedModel):
             "balance (amortised)."
         ),
     )
-    max_term_months = models.PositiveIntegerField(
-        default=24, help_text="Maximum repayment period in months."
-    )
-    min_term_months = models.PositiveIntegerField(
-        default=1, help_text="Minimum repayment period in months."
-    )
+    rate_period = models.CharField(max_length=16, choices=[("annual", "Per annum"), ("monthly", "Per month"), ("term", "Per loan term")], null=True, blank=True)
+    contribution_base = models.CharField(max_length=24, choices=[("all_time", "All-time compulsory contributions"), ("lookback", "Look-back period")], default="all_time")
+    contribution_lookback_months = models.PositiveIntegerField(null=True, blank=True)
+    minimum_contribution_count = models.PositiveIntegerField(null=True, blank=True)
+    minimum_contribution_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    required_share_units = models.PositiveIntegerField(default=0)
+    max_term_months = models.PositiveIntegerField(help_text="Maximum repayment period in months.")
+    min_term_months = models.PositiveIntegerField(help_text="Minimum repayment period in months.")
 
     # Approval rules
     auto_approval_threshold = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal("100000.00"),
+        max_digits=12, decimal_places=2,
         help_text="Loans at or below this amount can be auto-approved if all rules pass.",
     )
 
     is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
+    previous_version = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="next_versions",
+    )
 
     class Meta:
         ordering = ["name"]
@@ -124,6 +126,7 @@ class LoanApplication(TenantScopedModel):
         null=True, blank=True,
         help_text="JSON record of the eligibility evaluation results.",
     )
+    terms_snapshot = models.JSONField(default=dict, blank=True)
     evaluated_at = models.DateTimeField(null=True, blank=True)
 
     # Rejection/cancellation reason
@@ -234,6 +237,7 @@ class Loan(TenantScopedModel):
         max_digits=12, decimal_places=2,
         help_text="Monthly repayment installment.",
     )
+    calculation_snapshot = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE, db_index=True)
     disbursement_mode = models.CharField(
         max_length=50, default="bursary",

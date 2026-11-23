@@ -17,11 +17,34 @@ class LoanProductSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "description", "min_membership_months",
             "min_contribution_months", "guarantor_required_count",
-            "max_amount", "max_multiplier", "interest_rate", "interest_method",
-            "max_term_months", "min_term_months", "auto_approval_threshold",
-            "is_active", "created_at",
+            "min_amount", "max_amount", "max_multiplier", "interest_rate", "interest_method",
+            "rate_period", "contribution_base", "contribution_lookback_months",
+            "minimum_contribution_count", "minimum_contribution_percentage",
+            "required_share_units", "max_term_months", "min_term_months", "auto_approval_threshold",
+            "is_active", "version", "created_at",
+            "previous_version",
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "version", "created_at"]
+        extra_kwargs = {"rate_period": {"required": True}}
+
+    def validate(self, attrs):
+        if self.instance and "previous_version" in attrs:
+            raise serializers.ValidationError({"previous_version": "Product version lineage can only be set when a version is created."})
+        value = lambda key: attrs.get(key, getattr(self.instance, key, None) if self.instance else None)
+        if value("contribution_base") == "lookback" and not value("contribution_lookback_months"):
+            raise serializers.ValidationError({"contribution_lookback_months": "Required for a look-back contribution base."})
+        if value("max_multiplier") is not None and value("max_multiplier") <= 0:
+            raise serializers.ValidationError({"max_multiplier": "Must be greater than zero."})
+        if value("interest_rate") is not None and value("interest_rate") < 0:
+            raise serializers.ValidationError({"interest_rate": "Cannot be negative."})
+        if value("min_term_months") and value("max_term_months") and value("min_term_months") > value("max_term_months"):
+            raise serializers.ValidationError({"min_term_months": "Cannot exceed max_term_months."})
+        if value("min_amount") is not None and value("max_amount") is not None and value("min_amount") > value("max_amount"):
+            raise serializers.ValidationError({"min_amount": "Cannot exceed max_amount."})
+        for key in ("minimum_contribution_percentage",):
+            if value(key) is not None and not 0 <= value(key) <= 100:
+                raise serializers.ValidationError({key: "Must be between 0 and 100."})
+        return attrs
 
 
 class LoanGuarantorSerializer(serializers.ModelSerializer):
@@ -88,11 +111,11 @@ class LoanApplicationDetailSerializer(serializers.ModelSerializer):
             "id", "member_profile", "member_name", "product",
             "amount_requested", "purpose", "term_months", "status",
             "rule_evaluation", "evaluated_at", "rejection_reason",
-            "submitted_at", "guarantors", "approval_steps", "created_at",
+            "terms_snapshot", "submitted_at", "guarantors", "approval_steps", "created_at",
         ]
         read_only_fields = [
             "id", "status", "rule_evaluation", "evaluated_at",
-            "rejection_reason", "submitted_at", "created_at",
+            "rejection_reason", "terms_snapshot", "submitted_at", "created_at",
         ]
 
     def get_member_name(self, obj):
@@ -163,6 +186,14 @@ class LoanApplicationCreateSerializer(serializers.ModelSerializer):
             "term_months", "guarantor_member_ids",
         ]
 
+    def validate_loan_product(self, product):
+        request = self.context.get("request")
+        if request and product.tenant_id != request.tenant.id:
+            raise serializers.ValidationError("Loan product must belong to the active society.")
+        if not product.is_active:
+            raise serializers.ValidationError("This loan product is not accepting applications.")
+        return product
+
     def validate_term_months(self, value):
         product_id = self.initial_data.get("loan_product")
         if not product_id:
@@ -219,6 +250,7 @@ class LoanSerializer(serializers.ModelSerializer):
             "id", "application", "member_name", "principal_amount",
             "approved_amount", "interest_rate", "interest_method", "term_months",
             "total_repayable", "monthly_installment", "status",
+            "calculation_snapshot",
             "total_paid", "outstanding_balance", "disbursement_mode",
             "opened_at", "closed_at", "repayment_schedule",
         ]

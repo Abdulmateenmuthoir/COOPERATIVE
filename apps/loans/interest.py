@@ -57,9 +57,11 @@ class RepaymentQuote:
     """The full cost of a loan — what the member will repay."""
 
     principal: Decimal
+    configured_rate: Decimal
     annual_rate: Decimal
     term_months: int
     method: str
+    rate_period: str
     total_interest: Decimal
     total_repayable: Decimal
     monthly_installment: Decimal
@@ -74,8 +76,10 @@ class RepaymentQuote:
         return {
             "principal": f"{self.principal:.2f}",
             "annual_rate": f"{self.annual_rate:.2f}",
+            "interest_rate": f"{self.configured_rate:.2f}",
             "term_months": self.term_months,
             "interest_method": self.method,
+            "rate_period": self.rate_period,
             "interest_method_label": self.method_label,
             "total_interest": f"{self.total_interest:.2f}",
             "total_repayable": f"{self.total_repayable:.2f}",
@@ -166,11 +170,9 @@ def _flat_components(
 
 
 def _reducing_components(
-    principal: Decimal, annual_rate: Decimal, term: int
+    principal: Decimal, monthly_rate: Decimal, term: int
 ):
     """Interest on the falling balance — the level-payment (annuity) basis."""
-    monthly_rate = annual_rate / Decimal("100") / Decimal("12")
-
     if monthly_rate == 0:
         payment = principal / Decimal(term)
     else:
@@ -202,6 +204,7 @@ def calculate_repayment(
     annual_rate,
     term_months,
     method: str = FLAT,
+    rate_period: str = "annual",
 ) -> RepaymentQuote:
     """
     Price a loan.
@@ -212,8 +215,16 @@ def calculate_repayment(
     `method`      — ``flat`` or ``reducing``.
     """
     principal = _to_decimal(principal)
-    annual_rate = _to_decimal(annual_rate)
+    configured_rate = _to_decimal(annual_rate)
     term = int(term_months)
+
+    if rate_period not in {"annual", "monthly", "term"}:
+        raise InterestCalculationError("Rate period must be annual, monthly, or term.")
+    annual_rate = configured_rate
+    if rate_period == "monthly":
+        annual_rate = configured_rate * Decimal("12")
+    elif rate_period == "term":
+        annual_rate = configured_rate * Decimal("12") / Decimal(max(term, 1))
 
     if principal <= 0:
         raise InterestCalculationError("The loan amount must be greater than zero.")
@@ -227,8 +238,14 @@ def calculate_repayment(
         )
 
     if method == REDUCING:
+        if rate_period == "annual":
+            monthly_rate = configured_rate / Decimal("100") / Decimal("12")
+        elif rate_period == "monthly":
+            monthly_rate = configured_rate / Decimal("100")
+        else:
+            monthly_rate = (Decimal("1") + configured_rate / Decimal("100")) ** (Decimal("1") / Decimal(term)) - Decimal("1")
         total_interest, total_repayable, monthly, p_parts, i_parts = _reducing_components(
-            principal, annual_rate, term
+            principal, monthly_rate, term
         )
     else:
         total_interest, total_repayable, monthly, p_parts, i_parts = _flat_components(
@@ -239,9 +256,11 @@ def calculate_repayment(
 
     return RepaymentQuote(
         principal=principal,
+        configured_rate=configured_rate,
         annual_rate=annual_rate,
         term_months=term,
         method=method,
+        rate_period=rate_period,
         total_interest=total_interest,
         total_repayable=total_repayable,
         monthly_installment=monthly,

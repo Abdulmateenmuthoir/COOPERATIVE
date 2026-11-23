@@ -2,6 +2,7 @@
 Loans app views — Loan Products, Applications, Guarantors, Approval, and Repayments.
 """
 from django.db.models import Q
+from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -54,7 +55,7 @@ class LoanProductViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
     ordering_fields = ["name", "max_amount", "interest_rate", "created_at"]
 
     def get_permissions(self):
-        if self.action in ["list", "retrieve"]:
+        if self.action in ["list", "retrieve", "product_eligibility", "estimate"]:
             return [IsTenantMember()]
         # Loan products are society configuration — a rule package, not a
         # running task. Only the society admin configures them, expressed as the
@@ -82,7 +83,70 @@ class LoanProductViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
             if method is not None:
                 defaults["interest_method"] = method
 
-        serializer.save(tenant=tenant, **defaults)
+        previous = serializer.validated_data.get("previous_version")
+        if previous and previous.tenant_id != tenant.id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"previous_version": "Must belong to this society."})
+        if previous and (not previous.is_active or previous.next_versions.exists()):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"previous_version": "Choose the active latest product version."})
+        version = previous.version + 1 if previous else 1
+        product = serializer.save(tenant=tenant, version=version, **defaults)
+        if previous:
+            previous.is_active = False
+            previous.save(update_fields=["is_active", "updated_at"])
+
+    def perform_update(self, serializer):
+        product = self.get_object()
+        sensitive = set(serializer.validated_data) - {"description", "is_active"}
+        if sensitive and product.applications.exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                "detail": "Loan terms with existing applications cannot be edited. Create a new loan product version instead."
+            })
+        serializer.save(version=product.version + 1)
+
+    @action(detail=True, methods=["get"], url_path="eligibility")
+    def product_eligibility(self, request, pk=None):
+        from apps.users.models import MemberProfile
+        product = self.get_object()
+        profile = MemberProfile.objects.filter(tenant=request.tenant, user=request.user).first()
+        if not profile:
+            return Response({"detail": "Member profile not found."}, status=404)
+        amount = request.query_params.get("amount")
+        try:
+            amount = Decimal(amount) if amount is not None else None
+            term = int(request.query_params["term_months"]) if "term_months" in request.query_params else None
+        except (ValueError, TypeError, InvalidOperation):
+            return Response({"detail": "amount and term_months must be valid numeric values."}, status=400)
+        if amount is not None and (not amount.is_finite() or amount <= 0):
+            return Response({"amount": "Must be a finite amount greater than zero."}, status=400)
+        result = LoanEligibilityEngine(profile, product).evaluate(amount)
+        data = result.to_dict()
+        if term is not None:
+            max_term = effective_max_term_months(request.tenant, product)
+            if term < product.min_term_months or term > max_term:
+                return Response({"detail": f"Term must be between {product.min_term_months} and {max_term} months."}, status=400)
+            try:
+                data["quote"] = calculate_repayment(amount or result.max_borrowable, product.interest_rate, term, method=product.interest_method, rate_period=product.rate_period).to_dict()
+            except InterestCalculationError as exc:
+                return Response({"detail": str(exc)}, status=400)
+        return Response(data)
+
+    @action(detail=True, methods=["post"], url_path="estimate")
+    def estimate(self, request, pk=None):
+        product = self.get_object()
+        serializer = LoanQuoteSerializer(data={**request.data, "loan_product_id": str(product.id)})
+        serializer.is_valid(raise_exception=True)
+        amount = serializer.validated_data["amount"]
+        term = serializer.validated_data["term_months"]
+        max_term = effective_max_term_months(request.tenant, product)
+        if term < product.min_term_months or term > max_term:
+            return Response({"detail": f"Term must be between {product.min_term_months} and {max_term} months."}, status=400)
+        try:
+            return Response(calculate_repayment(amount, product.interest_rate, term, method=product.interest_method, rate_period=product.rate_period).to_dict())
+        except InterestCalculationError as exc:
+            return Response({"detail": str(exc)}, status=400)
 
 
 class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
@@ -304,6 +368,25 @@ class LoanApplicationViewSet(TenantScopedViewSetMixin, viewsets.ModelViewSet):
             member_profile=profile,
             status=LoanApplication.Status.SUBMITTED,
             submitted_at=timezone.now(),
+            terms_snapshot={
+                "product_id": str(serializer.validated_data["loan_product"].id),
+                "product_version": serializer.validated_data["loan_product"].version,
+                "name": serializer.validated_data["loan_product"].name,
+                "min_membership_months": serializer.validated_data["loan_product"].min_membership_months,
+                "min_contribution_months": serializer.validated_data["loan_product"].min_contribution_months,
+                "guarantor_required_count": serializer.validated_data["loan_product"].guarantor_required_count,
+                "min_amount": str(serializer.validated_data["loan_product"].min_amount) if serializer.validated_data["loan_product"].min_amount is not None else None,
+                "max_amount": str(serializer.validated_data["loan_product"].max_amount) if serializer.validated_data["loan_product"].max_amount is not None else None,
+                "max_multiplier": str(serializer.validated_data["loan_product"].max_multiplier),
+                "interest_rate": str(serializer.validated_data["loan_product"].interest_rate),
+                "rate_period": serializer.validated_data["loan_product"].rate_period,
+                "interest_method": serializer.validated_data["loan_product"].interest_method,
+                "min_term_months": serializer.validated_data["loan_product"].min_term_months,
+                "max_term_months": serializer.validated_data["loan_product"].max_term_months,
+                "required_share_units": serializer.validated_data["loan_product"].required_share_units,
+                "contribution_base": serializer.validated_data["loan_product"].contribution_base,
+                "contribution_lookback_months": serializer.validated_data["loan_product"].contribution_lookback_months,
+            },
         )
 
         # Create guarantor records
@@ -490,12 +573,16 @@ class EligibilityCheckView(viewsets.ViewSet):
         # When the member has told us the amount and the term, price the
         # loan in the same breath — one call, one answer.
         if amount is not None and term:
+            max_term = effective_max_term_months(request.tenant, product)
+            if term < product.min_term_months or term > max_term:
+                return Response({"detail": f"Term must be between {product.min_term_months} and {max_term} months."}, status=400)
             try:
                 quote = calculate_repayment(
                     amount,
                     product.interest_rate,
                     term,
                     method=product.interest_method,
+                    rate_period=product.rate_period,
                 )
             except InterestCalculationError as exc:
                 return Response({"detail": str(exc)}, status=400)
@@ -526,9 +613,9 @@ class LoanQuoteView(viewsets.ViewSet):
         term = serializer.validated_data["term_months"]
         max_term = effective_max_term_months(request.tenant, product)
 
-        if term > max_term:
+        if term < product.min_term_months or term > max_term:
             return Response(
-                {"detail": f"The repayment term must not exceed {max_term} months."},
+                {"detail": f"The repayment term must be between {product.min_term_months} and {max_term} months."},
                 status=400,
             )
 
@@ -538,6 +625,7 @@ class LoanQuoteView(viewsets.ViewSet):
                 product.interest_rate,
                 term,
                 method=product.interest_method,
+                rate_period=product.rate_period,
             )
         except InterestCalculationError as exc:
             return Response({"detail": str(exc)}, status=400)

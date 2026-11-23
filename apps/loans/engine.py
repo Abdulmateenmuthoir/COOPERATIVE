@@ -94,6 +94,7 @@ class LoanEligibilityEngine:
 
         results.append(self._check_membership_duration())
         results.append(self._check_contribution_history())
+        results.append(self._check_shareholding())
         results.append(self._check_outstanding_loans())
 
         max_borrowable = self._calculate_max_borrowable()
@@ -156,6 +157,14 @@ class LoanEligibilityEngine:
 
         months = self._months_between(joined_on, timezone.localdate())
         required = self.product.min_membership_months
+        from apps.contributions.models import ContributionEntry
+        latest_entry = ContributionEntry.objects.filter(
+            tenant=self.tenant, member_profile=self.member,
+            entry_type=ContributionEntry.EntryType.REGULAR,
+            cycle__status="closed",
+        ).order_by("-cycle__cycle_year", "-cycle__cycle_month").first()
+        if latest_entry and latest_entry.rule_snapshot.get("qualifying_membership_months") is not None:
+            required = max(required, latest_entry.rule_snapshot["qualifying_membership_months"])
         passed = months >= required
 
         return RuleResult(
@@ -181,24 +190,53 @@ class LoanEligibilityEngine:
         return max(months, 0)
 
     def _check_contribution_history(self) -> RuleResult:
-        """Check if member has sufficient consecutive contributions."""
+        """Check recent cycle-by-cycle history against its recorded due amount."""
         from apps.contributions.models import ContributionEntry
 
-        confirmed = ContributionEntry.objects.filter(
+        entries = list(ContributionEntry.objects.filter(
             tenant=self.tenant,
             member_profile=self.member,
             entry_type=ContributionEntry.EntryType.REGULAR,
-            status=ContributionEntry.Status.CONFIRMED,
-        ).count()
+            cycle__status="closed",
+        ).select_related("cycle").order_by("-cycle__cycle_year", "-cycle__cycle_month"))
 
-        required = self.product.min_contribution_months
-        passed = confirmed >= required
+        qualifying = 0
+        previous_period = None
+        for entry in entries:
+            period = (entry.cycle.cycle_year, entry.cycle.cycle_month)
+            if previous_period is not None:
+                expected = (previous_period[0] - 1, 12) if previous_period[1] == 1 else (previous_period[0], previous_period[1] - 1)
+                if period != expected:
+                    break
+            previous_period = period
+            if entry.status != ContributionEntry.Status.CONFIRMED or entry.amount_received < entry.amount_due:
+                break
+            qualifying += 1
+
+        policy = entries[0].rule_snapshot if entries else {}
+        required = max(self.product.min_contribution_months, policy.get("qualifying_periods") or 0)
+        passed = qualifying >= required
+
+        minimum_paid_periods = self.product.minimum_contribution_count
+        if policy.get("minimum_paid_periods") is not None:
+            minimum_paid_periods = max(minimum_paid_periods or 0, policy["minimum_paid_periods"])
+        if minimum_paid_periods is not None:
+            passed = passed and qualifying >= minimum_paid_periods
+        paid_percentage_threshold = self.product.minimum_contribution_percentage
+        if policy.get("minimum_paid_percentage") is not None:
+            paid_percentage_threshold = max(paid_percentage_threshold or Decimal("0"), Decimal(policy["minimum_paid_percentage"]))
+        if paid_percentage_threshold is not None:
+            window = entries[: required]
+            paid_percentage = (Decimal(len([e for e in window if e.status == ContributionEntry.Status.CONFIRMED and e.amount_received >= e.amount_due])) * Decimal("100") / Decimal(len(window))) if window else Decimal("0")
+            passed = passed and paid_percentage >= paid_percentage_threshold
+        else:
+            paid_percentage = None
 
         return RuleResult(
             "contribution_history",
             passed,
-            f"{'✓' if passed else '✗'} Contributions: {confirmed} confirmed (required: {required})",
-            {"confirmed_months": confirmed, "required_months": required},
+            f"{'✓' if passed else '✗'} Consecutive fully paid contribution periods: {qualifying} (required: {required})",
+            {"confirmed_months": qualifying, "required_months": required, "paid_percentage": str(paid_percentage) if paid_percentage is not None else None},
         )
 
     def _check_outstanding_loans(self) -> RuleResult:
@@ -229,6 +267,20 @@ class LoanEligibilityEngine:
             f"✓ No defaulted loans. Active loans: {active_count}",
             {"has_defaulted": False, "active_loans": active_count},
         )
+
+    def _check_shareholding(self) -> RuleResult:
+        required = self.product.required_share_units
+        if not required:
+            return RuleResult("shareholding", True, "No shareholding prerequisite for this product.", {"required_units": 0, "paid_units": 0})
+        from apps.contributions.models import Shareholding
+        paid_units = sum(Shareholding.objects.filter(
+            tenant=self.tenant, member_profile=self.member,
+            status=Shareholding.Status.PAID,
+        ).values_list("units_paid", flat=True))
+        passed = paid_units >= required
+        return RuleResult("shareholding", passed,
+            f"{'✓' if passed else '✗'} Paid share units: {paid_units} (required: {required})",
+            {"required_units": required, "paid_units": paid_units})
 
     def _check_guarantors(self) -> RuleResult:
         """
@@ -317,24 +369,46 @@ class LoanEligibilityEngine:
 
     def _check_amount(self, amount_requested, max_borrowable) -> RuleResult:
         """Check if requested amount is within limits."""
-        passed = amount_requested <= max_borrowable
+        minimum = self.product.min_amount
+        passed = amount_requested <= max_borrowable and (minimum is None or amount_requested >= minimum)
+        message = f"{'✓' if passed else '✗'} Requested: ₦{amount_requested:,.2f} (max: ₦{max_borrowable:,.2f})"
+        if minimum is not None and amount_requested < minimum:
+            message = f"✗ Requested amount is below the product minimum of ₦{minimum:,.2f}."
 
         return RuleResult(
             "amount_limit",
             passed,
-            f"{'✓' if passed else '✗'} Requested: ₦{amount_requested:,.2f} (max: ₦{max_borrowable:,.2f})",
-            {"requested": str(amount_requested), "max_borrowable": str(max_borrowable)},
+            message,
+            {"requested": str(amount_requested), "minimum": str(minimum) if minimum is not None else None, "max_borrowable": str(max_borrowable)},
         )
 
     def _calculate_max_borrowable(self) -> Decimal:
-        """Calculate the maximum amount a member can borrow."""
-        from apps.contributions.services import get_member_balance
-
-        balance = get_member_balance(self.member)
+        """Calculate borrowing headroom from qualifying compulsory contributions."""
+        balance = self._qualifying_contribution_base()
         multiplier_limit = balance * self.product.max_multiplier
         absolute_limit = self.product.max_amount
+        return min(multiplier_limit, absolute_limit) if absolute_limit is not None else multiplier_limit
 
-        return min(multiplier_limit, absolute_limit)
+    def _qualifying_contribution_base(self) -> Decimal:
+        from apps.contributions.models import ContributionEntry
+
+        entries = ContributionEntry.objects.filter(
+            tenant=self.tenant, member_profile=self.member,
+            entry_type=ContributionEntry.EntryType.REGULAR,
+            status=ContributionEntry.Status.CONFIRMED,
+        )
+        if self.product.contribution_base == "lookback" and self.product.contribution_lookback_months:
+            from django.utils import timezone
+            today = timezone.localdate()
+            month_index = today.year * 12 + today.month - 1 - (self.product.contribution_lookback_months - 1)
+            cutoff_year, cutoff_month = divmod(month_index, 12)
+            cutoff_month += 1
+            from django.db.models import Q
+            entries = entries.filter(
+                Q(cycle__cycle_year__gt=cutoff_year)
+                | Q(cycle__cycle_year=cutoff_year, cycle__cycle_month__gte=cutoff_month)
+            )
+        return sum((e.amount_received for e in entries if e.amount_received >= e.amount_due), Decimal("0.00"))
 
 
 class LoanApprovalEngine:
@@ -442,25 +516,40 @@ def _create_loan_from_application(application):
     principal = application.amount_requested
     term = application.term_months
 
+    terms = application.terms_snapshot or {}
+    rate = Decimal(str(terms.get("interest_rate", product.interest_rate)))
+    rate_period = terms.get("rate_period", product.rate_period)
+    interest_method = terms.get("interest_method", product.interest_method)
+
     # The same calculator that quotes the member a price before they apply
     # writes the contract, so the two can never disagree.
     quote = calculate_repayment(
         principal,
-        product.interest_rate,
+        rate,
         term,
-        method=product.interest_method,
+        method=interest_method,
+        rate_period=rate_period,
     )
+
+    contribution_base = LoanEligibilityEngine(application.member_profile, product)._qualifying_contribution_base()
+    snapshot = {
+        **terms,
+        "product_id": str(product.id), "product_name": product.name,
+        "contribution_base_amount": str(contribution_base), "term_months": term,
+        "quote": quote.to_dict(), "product_version": terms.get("product_version", product.version),
+    }
 
     loan = Loan.objects.create(
         tenant=application.tenant,
         application=application,
         principal_amount=principal,
         approved_amount=principal,
-        interest_rate=product.interest_rate,
-        interest_method=product.interest_method,
+        interest_rate=rate,
+        interest_method=interest_method,
         term_months=term,
         total_repayable=quote.total_repayable,
         monthly_installment=quote.monthly_installment,
+        calculation_snapshot=snapshot,
     )
 
     # Generate repayment schedule
