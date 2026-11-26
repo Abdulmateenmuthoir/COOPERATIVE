@@ -14,7 +14,7 @@ from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import OrderingFilter
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import (
@@ -54,8 +54,6 @@ from .serializers import (
     PermissionSerializer,
     RoleSerializer,
     UserAccountSerializer,
-    UserPermissionOverrideSerializer,
-    UserRegistrationSerializer,
 )
 
 
@@ -174,34 +172,6 @@ class TokenRefreshView(SimpleJWTTokenRefreshView):
     """
 
     serializer_class = CustomTokenRefreshSerializer
-
-
-class RegisterView(generics.CreateAPIView):
-    """
-    POST /api/v1/auth/register/
-
-    Register a new user. Optionally pass `tenant_code` to create
-    a pending membership in that cooperative society.
-    """
-
-    permission_classes = [AllowAny]
-    serializer_class = UserRegistrationSerializer
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        return Response(
-            {
-                "detail": "Registration successful. Your membership is pending approval.",
-                "user": {
-                    "id": str(user.id),
-                    "email": user.email,
-                    "full_name": user.full_name,
-                },
-            },
-            status=status.HTTP_201_CREATED,
-        )
 
 
 class LogoutView(generics.GenericAPIView):

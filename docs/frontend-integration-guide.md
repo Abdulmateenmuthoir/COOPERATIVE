@@ -126,13 +126,12 @@ Other auth routes:
 
 | Method and route | Use |
 | --- | --- |
-| `POST /api/v1/auth/register/` | Self-registration; body has `email`, `first_name`, `last_name`, `phone`, `password`, `password_confirm`, optional `tenant_code`. |
 | `POST /api/v1/auth/refresh/` | Rotate/refresh access token with `{ "refresh": "..." }`. |
 | `POST /api/v1/auth/logout/` | Blacklist refresh token with `{ "refresh": "..." }`. |
 | `POST /api/v1/auth/password/change/` | Authenticated password change; requires `old_password`, `new_password`, `new_password_confirm`. |
 | `GET /api/v1/auth/me/` | Current account and active memberships. |
 
-Self-registration creates a `PENDING` membership when the supplied society code is valid. If `tenant_code` is omitted, it creates only the account; the person has no society membership and cannot sign in to tenant endpoints. A pending member cannot sign in until a society admin activates the membership. The registration serializer silently ignores an invalid society code, so the UI should validate/show the selected society before submitting and not assume membership creation succeeded from the 201 response alone.
+There is no public self-registration: members are onboarded by a society admin via `POST /api/v1/members/` (which emails an invitation link) — see the Members section. New accounts must accept the invitation and set a permanent password before they can sign in.
 
 Self-registration creates a user and membership, but does **not** create a `MemberProfile`. After approval, the member needs to complete the tenant profile through `/api/v1/members/{membership_id}/profile/`; the first `GET` creates a blank profile if missing. Capture the employment/payroll fields there before showing contribution/loan workflows, because those workflows return `Member profile not found` without one.
 
@@ -280,7 +279,7 @@ All routes below are prefixed with `/api/v1/`.
 
 | Area | Routes |
 | --- | --- |
-| Auth | `auth/login/`, `auth/register/`, `auth/refresh/`, `auth/logout/`, `auth/me/`, `auth/password/change/`; invitation page is `auth/accept-invitation/{uidb64}/{token}/` (HTML page, not JSON). |
+| Auth | `auth/login/`, `auth/refresh/`, `auth/logout/`, `auth/me/`, `auth/password/change/`; invitation page is `auth/accept-invitation/{uidb64}/{token}/` (HTML page, not JSON). |
 | Members | `members/`, `members/pending/`, `members/guarantor-candidates/`, `members/{id}/`, `members/{id}/profile/`, `members/{id}/status/`, `members/{id}/role/`, `members/roles/`, `members/permissions/`. |
 | Contributions | `contributions/plans/`, `contributions/agreements/`, `contributions/cycles/`, `contributions/cycles/{id}/entries/`, `contributions/cycles/{id}/confirm/`, `contributions/cycles/{id}/penalties/`, `contributions/entries/`, `contributions/entries/{id}/confirm/`, `contributions/my/`, `contributions/my/balance/`, `contributions/my/summary/`, `contributions/ledger/`, `contributions/shares/products/`, `contributions/shares/holdings/`, `contributions/dividends/declarations/`, `contributions/dividends/entitlements/`, `contributions/exit-requests/`. |
 | Loans | `loans/products/`, `loans/products/{id}/eligibility/`, `loans/products/{id}/estimate/`, `loans/eligibility/`, `loans/quote/`, `loans/applications/`, `loans/applications/guarantor-requests/`, `loans/applications/{id}/guarantee-request/`, `loans/applications/{id}/confirm-guarantor/`, `loans/applications/{id}/approve/`, `loans/active/`. |

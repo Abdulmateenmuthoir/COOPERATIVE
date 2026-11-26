@@ -7,7 +7,6 @@ from apps.users.views import (
     LoginView,
     LogoutView,
     PasswordChangeView,
-    RegisterView,
     TokenRefreshView,
 )
 
@@ -18,7 +17,6 @@ urlpatterns = [
         name="auth-accept-invitation",
     ),
     path("login/", LoginView.as_view(), name="auth-login"),
-    path("register/", RegisterView.as_view(), name="auth-register"),
     path("refresh/", TokenRefreshView.as_view(), name="auth-refresh"),
     path("logout/", LogoutView.as_view(), name="auth-logout"),
     path("password/change/", PasswordChangeView.as_view(), name="auth-password-change"),

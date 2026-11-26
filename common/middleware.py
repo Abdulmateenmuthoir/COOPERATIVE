@@ -27,7 +27,6 @@ TENANT_EXEMPT_PREFIXES = (
     "/api/docs/",
     "/api/redoc/",
     "/api/v1/auth/login/",
-    "/api/v1/auth/register/",
     "/api/v1/auth/password/reset/",
     "/api/v1/platform/",  # SUPER_ADMIN endpoints handle tenant context differently
     "/__debug__/",

@@ -163,57 +163,6 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
             raise AuthenticationFailed("User no longer exists.")
 
 
-class UserRegistrationSerializer(serializers.ModelSerializer):
-    """Serializer for new user registration."""
-
-    password = serializers.CharField(write_only=True, min_length=8)
-    password_confirm = serializers.CharField(write_only=True)
-    tenant_code = serializers.CharField(write_only=True, required=False)
-
-    class Meta:
-        model = UserAccount
-        fields = [
-            "email",
-            "first_name",
-            "last_name",
-            "phone",
-            "password",
-            "password_confirm",
-            "tenant_code",
-        ]
-
-    def validate(self, data):
-        if data["password"] != data["password_confirm"]:
-            raise serializers.ValidationError({"password_confirm": "Passwords do not match."})
-        return data
-
-    def create(self, validated_data):
-        validated_data.pop("password_confirm")
-        tenant_code = validated_data.pop("tenant_code", None)
-        password = validated_data.pop("password")
-
-        user = UserAccount.objects.create_user(password=password, **validated_data)
-
-        # If tenant_code provided, create a pending membership
-        if tenant_code:
-            from apps.core.models import Tenant
-
-            try:
-                tenant = Tenant.objects.get(code=tenant_code, status=Tenant.Status.ACTIVE)
-                member_role = Role.objects.filter(code="MEMBER", tenant__isnull=True).first()
-                if member_role:
-                    Membership.objects.create(
-                        tenant=tenant,
-                        user=user,
-                        role=member_role,
-                        status=Membership.Status.PENDING,
-                    )
-            except Tenant.DoesNotExist:
-                pass  # Silently ignore invalid tenant code during registration
-
-        return user
-
-
 class PasswordChangeSerializer(serializers.Serializer):
     """Serializer for password change."""
 
