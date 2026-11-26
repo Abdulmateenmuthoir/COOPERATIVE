@@ -17,7 +17,10 @@ from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView as SimpleJWTTokenRefreshView,
+)
 from common.mixins import TenantScopedViewSetMixin
 from common.permissions import (
     HasTenantPermission,
@@ -39,6 +42,7 @@ from .models import (
 )
 from .serializers import (
     CustomTokenObtainPairSerializer,
+    CustomTokenRefreshSerializer,
     GuarantorCandidateSerializer,
     MemberCreateSerializer,
     MemberDetailSerializer,
@@ -158,6 +162,18 @@ class LoginView(TokenObtainPairView):
     """
 
     serializer_class = CustomTokenObtainPairSerializer
+
+
+class TokenRefreshView(SimpleJWTTokenRefreshView):
+    """
+    POST /api/v1/auth/refresh/
+
+    Same as SimpleJWT's refresh, but returns 401 instead of 500 when the
+    token belongs to a user that no longer exists (e.g. after a database
+    migration or account deletion).
+    """
+
+    serializer_class = CustomTokenRefreshSerializer
 
 
 class RegisterView(generics.CreateAPIView):

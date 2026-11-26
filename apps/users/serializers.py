@@ -2,9 +2,14 @@
 Users app serializers — Auth, Member Management, and RBAC.
 """
 from django.contrib.auth import authenticate
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 from rest_framework import serializers
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.serializers import (
+    TokenObtainPairSerializer,
+    TokenRefreshSerializer,
+)
 
 from .models import (
     MemberProfile,
@@ -139,6 +144,23 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         membership = memberships[0]
         return membership.tenant, membership
+
+
+class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+    """
+    Token refresh that fails cleanly when the token's user no longer exists.
+
+    SimpleJWT's default serializer looks the user up to enforce the auth
+    rule but lets DoesNotExist escape as an unhandled 500. After a database
+    swap or account deletion, stale refresh tokens are expected — they must
+    get a 401 so clients drop the session and re-authenticate.
+    """
+
+    def validate(self, attrs):
+        try:
+            return super().validate(attrs)
+        except ObjectDoesNotExist:
+            raise AuthenticationFailed("User no longer exists.")
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
